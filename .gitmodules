@@ -1,0 +1,3 @@
+[submodule "model_launch"]
+	path = model_launch
+	url = https://github.com/swiss-ai/model-launch.git
