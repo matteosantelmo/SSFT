@@ -1,3 +1,7 @@
 [submodule "model_launch"]
 	path = model_launch
 	url = https://github.com/swiss-ai/model-launch.git
+[submodule "verl_rl"]
+	path = verl_rl
+	url = https://github.com/swiss-ai/verl.git
+	branch = 1p5-async-rl
