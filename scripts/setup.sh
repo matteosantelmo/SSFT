@@ -21,5 +21,22 @@ uv venv --python 3.12 "$REPO/.venv"
 source "$REPO/.venv/bin/activate"
 uv pip install -e "$REPO/model_launch" openai
 
+# Dependencies for the generation+verification pipeline
+uv pip install \
+  pandas "pyarrow>=19.0.0" tqdm \
+  math-verify latex2sympy2-extended pylatexenc "numpy<2.0.0" \
+  nltk langdetect immutabledict emoji syllapy "setuptools<81"
+
+# The instruction-following verifier tokenizes with nltk; fetch its data once.
+python - <<'PY'
+import nltk
+for pkg in ("punkt", "punkt_tab"):
+    try:
+        nltk.download(pkg, quiet=True)
+    except Exception as exc:
+        print(f"[warn] nltk.download({pkg!r}) failed: {exc}")
+PY
+
 # Remember: `sml init` (once) configures the slurm launcher + CSCS API key,
-# then `./scripts/run_poc.sh` launches the PoC.
+# then `./scripts/run_poc.sh` launches the PoC, or `./scripts/run_pipeline.sh`
+# runs the scalable generation+verification pipeline.
