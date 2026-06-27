@@ -38,16 +38,24 @@ PROJECT_NAME="test-evals"
 
 MODEL_PATH=/capstor/store/cscs/swissai/infra01/apertus_1p5/hf_checkpoints/ap1p5-8b-sft-256k-adam-lr6e-5-constant-128n_4200  # /users/msantelmo/scratch/checkpoints/Apertus-1p5-8B-sft-capfilter-linear-it8816-thinking-token-fixed
 TOKENIZER_PATH="/capstor/store/cscs/swissai/infra01/reasoning/models/tokenizers/apertus_emu3.5_wavtok_instruct_thinking_token_fixed"
-CHAT_TEMPLATE=/capstor/store/cscs/swissai/infra01/tool-parser-vllm/apertus_chat_template.jinja
+CHAT_TEMPLATE="/capstor/store/cscs/swissai/infra01/tool-parser-vllm/apertus_chat_template.jinja"
 THINKING=on
-# Must be false to parse reasoning <|inner_prefix|>/<|inner_suffix|> 
-SKIP_SPECIAL_TOKENS="${SKIP_SPECIAL_TOKENS:-false}"
 
-TIME_LIMIT="${TIME_LIMIT:-04:00:00}"
-REPLICAS=2
+if [[ "$THINKING" == "on" ]]; then
+# Must be false to parse reasoning <|inner_prefix|>/<|inner_suffix|> 
+  SKIP_SPECIAL_TOKENS=false
+  THINKING_TAG="-think"
+else
+  SKIP_SPECIAL_TOKENS=true
+  THINKING_TAG="-no-think"
+fi
+
+TIME_LIMIT="${TIME_LIMIT:-08:00:00}"
+REPEATS="128"
+REPLICAS=8
 NODES_PER_REPLICA=1
 TP_SIZE=4
-MAX_MODEL_LEN=8192
+MAX_MODEL_LEN=32768
 GPU_MEM_UTIL=0.8
 
 ENV_TOML="$REPO/model_launch/src/swiss_ai_model_launch/assets/envs/vllm_apertus_1.5.toml"
@@ -56,13 +64,12 @@ PARTITION="normal"
 RESERVATION="SD-69241-apertus-1-5-0"
 
 # client-side knobs (forwarded to src/generate.py)
-REPEATS="${REPEATS:-8}"
-SEED="${SEED:-0}"
+SEED="85"
 CONCURRENCY="${CONCURRENCY:-128}"
 VERIFY_CONCURRENCY="${VERIFY_CONCURRENCY:-32}"
 TEMPERATURE="${TEMPERATURE:-0.8}"
 TOP_P="${TOP_P:-0.95}"
-MAX_TOKENS="${MAX_TOKENS:-2048}"
+MAX_TOKENS=16384
 START="${START:-0}"
 END="${END:-}"
 
@@ -77,11 +84,11 @@ fi
 source "$REPO/.venv/bin/activate"
 
 # ---- output dir ------------------------------------------------------------
-SERVED_MODEL_NAME=$(basename "$MODEL_PATH")-$USER
+SERVED_MODEL_NAME=$(basename "$MODEL_PATH")${THINKING_TAG}-$USER
 MODEL_NAME="$(basename "$MODEL_PATH")"
 DATASET_NAME="$(basename "$(dirname "$INPUT_PARQUET")")"
 STAMP="$(date +%Y%m%d-%H%M%S)"
-OUTPUT_DIR="$REPO/outputs/$PROJECT_NAME/${MODEL_NAME}_${DATASET_NAME}_${STAMP}"
+OUTPUT_DIR="$REPO/outputs/$PROJECT_NAME/${MODEL_NAME}${THINKING_TAG}__${DATASET_NAME}_${STAMP}"
 mkdir -p "$OUTPUT_DIR/logs"
 
 reservation_args=()
@@ -143,7 +150,7 @@ ln -sfn "$SML_LOG_DIR" "$OUTPUT_DIR/logs/serving"
 ########################################
 CLIENT_TIME="${CLIENT_TIME:-$TIME_LIMIT}"
 CLIENT_CPUS="${CLIENT_CPUS:-32}"
-KEEP_ALIVE="${KEEP_ALIVE:-1}"
+KEEP_ALIVE="${KEEP_ALIVE:-0}"
 
 export REPO JOB_ID SERVED_MODEL_NAME INPUT_PARQUET OUTPUT_DIR \
   CONCURRENCY VERIFY_CONCURRENCY REPEATS SEED TEMPERATURE TOP_P MAX_TOKENS \

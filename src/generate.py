@@ -189,8 +189,6 @@ async def process_item(
                 **sampling,
             )
 
-        print(resp)
-
         choice = resp.choices[0]
         reasoning, answer = split_reasoning(choice.message.content)
         record["response"] = answer  # the answer (post-reasoning) is what gets scored
