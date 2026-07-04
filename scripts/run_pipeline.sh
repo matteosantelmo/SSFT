@@ -50,9 +50,11 @@ else
   THINKING_TAG="-no-think"
 fi
 
-TIME_LIMIT="${TIME_LIMIT:-08:00:00}"
-REPEATS="128"
-REPLICAS=8
+STOP_ON_FIRST_CORRECT=on
+CORRECT_THRESHOLD="${CORRECT_THRESHOLD:-0.7}"
+TIME_LIMIT="${TIME_LIMIT:-12:00:00}"
+REPEATS=8
+REPLICAS=10
 NODES_PER_REPLICA=1
 TP_SIZE=4
 MAX_MODEL_LEN=32768
@@ -88,7 +90,7 @@ SERVED_MODEL_NAME=$(basename "$MODEL_PATH")${THINKING_TAG}-$USER
 MODEL_NAME="$(basename "$MODEL_PATH")"
 DATASET_NAME="$(basename "$(dirname "$INPUT_PARQUET")")"
 STAMP="$(date +%Y%m%d-%H%M%S)"
-OUTPUT_DIR="$REPO/outputs/$PROJECT_NAME/${MODEL_NAME}${THINKING_TAG}__${DATASET_NAME}_${STAMP}"
+OUTPUT_DIR="${OUTPUT_DIR:-$REPO/outputs/$PROJECT_NAME/${MODEL_NAME}${THINKING_TAG}__${DATASET_NAME}_${STAMP}}"
 mkdir -p "$OUTPUT_DIR/logs"
 
 reservation_args=()
@@ -117,6 +119,7 @@ echo "   input      : $INPUT_PARQUET"
 echo "   output     : $OUTPUT_DIR"
 echo "   layout     : $REPLICAS replicas x $NODES_PER_REPLICA node (TP=$TP_SIZE), OpenTela-routed via gateway"
 echo "   client     : concurrency=$CONCURRENCY repeats=$REPEATS thinking=$THINKING"
+echo "   early stop : $STOP_ON_FIRST_CORRECT (correct threshold=$CORRECT_THRESHOLD)"
 echo "   chat tmpl  : ${CHAT_TEMPLATE:-<model-dir default>}"
 echo "   tokenizer  : ${TOKENIZER_PATH:-<model-dir default>}"
 echo "   partition  : $PARTITION  reservation: ${RESERVATION:-<none>}  time: $TIME_LIMIT"
@@ -154,7 +157,8 @@ KEEP_ALIVE="${KEEP_ALIVE:-0}"
 
 export REPO JOB_ID SERVED_MODEL_NAME INPUT_PARQUET OUTPUT_DIR \
   CONCURRENCY VERIFY_CONCURRENCY REPEATS SEED TEMPERATURE TOP_P MAX_TOKENS \
-  SKIP_SPECIAL_TOKENS THINKING START END KEEP_ALIVE
+  SKIP_SPECIAL_TOKENS THINKING START END KEEP_ALIVE STOP_ON_FIRST_CORRECT \
+  CORRECT_THRESHOLD
 
 client_submit="$(sbatch \
   --partition="$PARTITION" \

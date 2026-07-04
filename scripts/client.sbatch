@@ -13,6 +13,11 @@ source "$REPO/.venv/bin/activate"
 end_arg=()
 [[ -n "${END:-}" ]] && end_arg=(--end "$END")
 
+early_stop_arg=()
+case "${STOP_ON_FIRST_CORRECT:-0}" in
+  1|true|yes|on) early_stop_arg=(--stop-on-first-correct) ;;
+esac
+
 python "$REPO/src/generate.py" \
   --job-id "$JOB_ID" \
   --served-model-name "$SERVED_MODEL_NAME" \
@@ -21,6 +26,7 @@ python "$REPO/src/generate.py" \
   --concurrency "$CONCURRENCY" \
   --verify-concurrency "$VERIFY_CONCURRENCY" \
   --repeats "$REPEATS" \
+  --correct-threshold "$CORRECT_THRESHOLD" "${early_stop_arg[@]}" \
   --seed "$SEED" \
   --temperature "$TEMPERATURE" \
   --top-p "$TOP_P" \

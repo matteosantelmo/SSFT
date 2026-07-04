@@ -22,6 +22,7 @@ import json
 import os
 import sys
 import time
+from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
@@ -115,11 +116,11 @@ def build_work_items(df: pd.DataFrame, repeats: int, seed: int) -> list[dict]:
     return items
 
 
-def load_done_ids(results_path: str) -> set[str]:
-    """Read an existing results.jsonl and return the set of completed ids."""
-    done: set[str] = set()
+def load_completed_results(results_path: str) -> dict[str, dict]:
+    """Read valid records from an existing results.jsonl, keyed by id."""
+    completed: dict[str, dict] = {}
     if not os.path.exists(results_path):
-        return done
+        return completed
     with open(results_path, encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
@@ -131,8 +132,43 @@ def load_done_ids(results_path: str) -> set[str]:
                 # half-written trailing line from a previous interruption; ignore
                 continue
             if "id" in rec:
-                done.add(rec["id"])
-    return done
+                completed[rec["id"]] = rec
+    return completed
+
+
+def load_done_ids(results_path: str) -> set[str]:
+    """Read an existing results.jsonl and return the set of completed ids."""
+    return set(load_completed_results(results_path))
+
+
+def _prompt_id(item_id: str) -> str:
+    return item_id.rsplit("#", 1)[0]
+
+
+def _is_correct(record: dict, threshold: float) -> bool:
+    score = record.get("score")
+    return score is not None and score >= threshold
+
+
+def select_pending_items(
+    items: list[dict],
+    completed: dict[str, dict],
+    stop_on_first_correct: bool,
+    correct_threshold: float,
+) -> list[dict]:
+    """Drop completed attempts and, in adaptive mode, already-solved prompts."""
+    solved = set()
+    if stop_on_first_correct:
+        solved = {
+            _prompt_id(item_id)
+            for item_id, record in completed.items()
+            if _is_correct(record, correct_threshold)
+        }
+    return [
+        item
+        for item in items
+        if item["id"] not in completed and _prompt_id(item["id"]) not in solved
+    ]
 
 
 async def writer_task(queue: asyncio.Queue, results_path: str) -> None:
@@ -215,6 +251,21 @@ async def process_item(
     return record
 
 
+async def process_prompt(
+    items: list[dict],
+    process: Callable[[dict], Awaitable[dict]],
+    correct_threshold: float,
+) -> list[dict]:
+    """Process one prompt's attempts sequentially, stopping when it is solved."""
+    records = []
+    for item in items:
+        record = await process(item)
+        records.append(record)
+        if _is_correct(record, correct_threshold):
+            break
+    return records
+
+
 async def run(args, items: list[dict], results_path: str) -> None:
     """Drive all work items concurrently (generate + verify) and stream results to disk."""
     client = AsyncOpenAI(base_url=args.base_url, api_key=load_api_key(), max_retries=args.max_retries)
@@ -233,22 +284,41 @@ async def run(args, items: list[dict], results_path: str) -> None:
         "chat_template_kwargs": {"enable_thinking": args.enable_thinking},
     }
 
-    writer = asyncio.create_task(writer_task(queue, results_path))
-    tasks = [
-        asyncio.create_task(process_item(
+    async def process(it: dict) -> dict:
+        return await process_item(
             it, client, args.served_model_name, gen_sem, verify_sem,
             verify_pool, queue, sampling, extra_body_base, args.enable_thinking,
-        ))
-        for it in items
-    ]
+        )
+
+    writer = asyncio.create_task(writer_task(queue, results_path))
+    if args.stop_on_first_correct:
+        groups: dict[str, list[dict]] = {}
+        for item in items:
+            groups.setdefault(_prompt_id(item["id"]), []).append(item)
+        tasks = [
+            asyncio.create_task(
+                process_prompt(group, process, args.correct_threshold)
+            )
+            for group in groups.values()
+        ]
+    else:
+        tasks = [asyncio.create_task(process(item)) for item in items]
 
     verify_times: list[float] = []
-    pbar = tqdm(total=len(tasks), desc="generate+verify", unit="sample")
+    generated = 0
+    pbar = tqdm(
+        total=None if args.stop_on_first_correct else len(tasks),
+        desc="generate+verify",
+        unit="sample",
+    )
     for fut in asyncio.as_completed(tasks):
-        rec = await fut
-        if rec.get("verify_seconds") is not None:
-            verify_times.append(rec["verify_seconds"])
-        pbar.update(1)
+        result = await fut
+        records = result if isinstance(result, list) else [result]
+        for record in records:
+            if record.get("verify_seconds") is not None:
+                verify_times.append(record["verify_seconds"])
+        generated += len(records)
+        pbar.update(len(records))
     pbar.close()
 
     if verify_times:
@@ -260,7 +330,7 @@ async def run(args, items: list[dict], results_path: str) -> None:
     await queue.put(None)  # tell writer to finish
     await writer
     verify_pool.shutdown(wait=True)
-    print(f"[done] wrote {len(tasks)} results to {results_path}")
+    print(f"[done] wrote {generated} results to {results_path}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -273,6 +343,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--concurrency", type=int, default=128, help="Max in-flight generations.")
     p.add_argument("--verify-concurrency", type=int, default=32, help="Max concurrent verifications.")
     p.add_argument("--repeats", type=int, default=1, help="Generations per prompt.")
+    p.add_argument(
+        "--stop-on-first-correct",
+        action="store_true",
+        help="Retry each prompt until one score reaches --correct-threshold, up to --repeats.",
+    )
+    p.add_argument(
+        "--correct-threshold",
+        type=float,
+        default=0.7,
+        help="Score considered correct when --stop-on-first-correct is enabled.",
+    )
     p.add_argument("--seed", type=int, default=0,
                    help="Base request seed; repeat i uses seed+i so repeats diverge yet stay reproducible.")
     p.add_argument("--start", type=int, default=0, help="First row (inclusive).")
@@ -301,11 +382,16 @@ def main() -> None:
     print(f"[input] {args.input}: rows [{args.start}:{end}] -> {len(df)} prompts")
 
     items = build_work_items(df, args.repeats, args.seed)
-    done = load_done_ids(results_path)
-    if done:
+    completed = load_completed_results(results_path)
+    if completed:
         before = len(items)
-        items = [it for it in items if it["id"] not in done]
-        print(f"[resume] {len(done)} results already present; "
+        items = select_pending_items(
+            items,
+            completed,
+            args.stop_on_first_correct,
+            args.correct_threshold,
+        )
+        print(f"[resume] {len(completed)} results already present; "
               f"skipping {before - len(items)}, {len(items)} remaining.")
     if not items:
         print("[done] nothing to do — all requested items already present.")
