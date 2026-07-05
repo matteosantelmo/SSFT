@@ -32,17 +32,18 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO"
 
 # ---- configuration (override via env) --------------------------------------
-INPUT_PARQUET="/users/msantelmo/scratch/SSFT/data/test_evals_think/val.parquet"
-# INPUT_PARQUET="/users/msantelmo/scratch/SSFT/data/test_evals/val.parquet"
-PROJECT_NAME="test-evals"
+INPUT_PARQUET=/users/msantelmo/scratch/SSFT/data/sft_reasoning_dataset/train.parquet
+PROJECT_NAME="capability-filtering"
 
-MODEL_PATH=/capstor/store/cscs/swissai/infra01/apertus_1p5/hf_checkpoints/ap1p5-8b-sft-256k-adam-lr6e-5-constant-128n_4200  # /users/msantelmo/scratch/checkpoints/Apertus-1p5-8B-sft-capfilter-linear-it8816-thinking-token-fixed
+MODEL_PATH=/users/msantelmo/scratch/checkpoints/Apertus-1p5-8B-sft-capfilter-linear-it8816-thinking-token-fixed
+# MODEL_PATH=/capstor/store/cscs/swissai/infra01/apertus_1p5/hf_checkpoints/ap1p5-8b-sft-256k-adam-lr6e-5-constant-128n_4200
 TOKENIZER_PATH="/capstor/store/cscs/swissai/infra01/reasoning/models/tokenizers/apertus_emu3.5_wavtok_instruct_thinking_token_fixed"
-CHAT_TEMPLATE="/capstor/store/cscs/swissai/infra01/tool-parser-vllm/apertus_chat_template.jinja"
-THINKING=on
+CHAT_TEMPLATE=""
+THINKING=off
+OUTPUT_DIR="/users/msantelmo/scratch/SSFT/outputs/capability-filtering/Apertus-1p5-8B-sft-capfilter-linear-it8816-thinking-token-fixed-no-think__sft_reasoning_dataset_20260630-135930"
 
 if [[ "$THINKING" == "on" ]]; then
-# Must be false to parse reasoning <|inner_prefix|>/<|inner_suffix|> 
+  # Must be false to parse reasoning <|inner_prefix|>/<|inner_suffix|>
   SKIP_SPECIAL_TOKENS=false
   THINKING_TAG="-think"
 else

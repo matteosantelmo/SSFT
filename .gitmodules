@@ -5,3 +5,7 @@
 	path = verl_rl
 	url = https://github.com/swiss-ai/verl.git
 	branch = 1p5-async-rl
+[submodule "verl_sft"]
+	path = verl_sft
+	url = https://github.com/matteosantelmo/verl.git
+	branch = apertus-sft
