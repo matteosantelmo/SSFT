@@ -57,18 +57,27 @@ TIME_LIMIT="${TIME_LIMIT:-12:00:00}"
 REPEATS=8
 REPLICAS=10
 NODES_PER_REPLICA=1
-TP_SIZE=4
+TP_SIZE=1
+DP_SIZE=4
 MAX_MODEL_LEN=32768
 GPU_MEM_UTIL=0.8
 
+FRAMEWORK="${FRAMEWORK:-sglang}"
+if [[ "$FRAMEWORK" == "sglang" ]]; then
+  ENV_TOML="$REPO/model_launch/src/swiss_ai_model_launch/assets/envs/sglang.toml"
+  ROUTER="sglang"
+  ROUTER_ARGS="${ROUTER_ARGS:-}"
+else
 ENV_TOML="$REPO/model_launch/src/swiss_ai_model_launch/assets/envs/vllm_apertus_1.5.toml"
-FRAMEWORK="vllm"
+  ROUTER="opentela"
+  ROUTER_ARGS=""
+fi
 PARTITION="normal"
 RESERVATION="SD-69241-apertus-1-5-0"
 
 # client-side knobs (forwarded to src/generate.py)
 SEED="85"
-CONCURRENCY="${CONCURRENCY:-128}"
+CONCURRENCY="${CONCURRENCY:-512}"
 VERIFY_CONCURRENCY="${VERIFY_CONCURRENCY:-32}"
 TEMPERATURE="${TEMPERATURE:-0.8}"
 TOP_P="${TOP_P:-0.95}"
@@ -97,9 +106,22 @@ mkdir -p "$OUTPUT_DIR/logs"
 reservation_args=()
 [[ -n "$RESERVATION" ]] && reservation_args=(--reservation "$RESERVATION")
 
+if [[ "$FRAMEWORK" == "sglang" ]]; then
+  FRAMEWORK_ARGS="--model-path $MODEL_PATH \
+    --served-model-name $SERVED_MODEL_NAME \
+    --tp-size $TP_SIZE \
+    --dp-size $DP_SIZE \
+    --host 0.0.0.0 \
+    --trust-remote-code \
+    --context-length $MAX_MODEL_LEN \
+    --mem-fraction-static $GPU_MEM_UTIL"
+  [[ -n "$CHAT_TEMPLATE" ]] && FRAMEWORK_ARGS="$FRAMEWORK_ARGS --chat-template $CHAT_TEMPLATE"
+  [[ -n "$TOKENIZER_PATH" ]] && FRAMEWORK_ARGS="$FRAMEWORK_ARGS --tokenizer-path $TOKENIZER_PATH"
+else
 FRAMEWORK_ARGS="--model $MODEL_PATH \
   --served-model-name $SERVED_MODEL_NAME \
   --tensor-parallel-size $TP_SIZE \
+    --data-parallel-size $DP_SIZE \
   --host 0.0.0.0 \
   --trust-remote-code \
   --trust-request-chat-template \
@@ -108,6 +130,7 @@ FRAMEWORK_ARGS="--model $MODEL_PATH \
   --gpu-memory-utilization $GPU_MEM_UTIL"
 [[ -n "$CHAT_TEMPLATE" ]] && FRAMEWORK_ARGS="$FRAMEWORK_ARGS --chat-template $CHAT_TEMPLATE"
 [[ -n "$TOKENIZER_PATH" ]] && FRAMEWORK_ARGS="$FRAMEWORK_ARGS --tokenizer $TOKENIZER_PATH"
+fi
 
 ########################################
 # 1. launch serving 
@@ -118,13 +141,16 @@ echo "   model      : $MODEL_PATH"
 echo "   served as  : $SERVED_MODEL_NAME"
 echo "   input      : $INPUT_PARQUET"
 echo "   output     : $OUTPUT_DIR"
-echo "   layout     : $REPLICAS replicas x $NODES_PER_REPLICA node (TP=$TP_SIZE), OpenTela-routed via gateway"
+echo "   layout     : $REPLICAS replicas x $NODES_PER_REPLICA node (TP=$TP_SIZE, DP=$DP_SIZE -> $((REPLICAS * DP_SIZE)) engines), $FRAMEWORK, router=$ROUTER"
 echo "   client     : concurrency=$CONCURRENCY repeats=$REPEATS thinking=$THINKING"
 echo "   early stop : $STOP_ON_FIRST_CORRECT (correct threshold=$CORRECT_THRESHOLD)"
 echo "   chat tmpl  : ${CHAT_TEMPLATE:-<model-dir default>}"
 echo "   tokenizer  : ${TOKENIZER_PATH:-<model-dir default>}"
 echo "   partition  : $PARTITION  reservation: ${RESERVATION:-<none>}  time: $TIME_LIMIT"
 echo "============================================================"
+
+router_args_opt=()
+[[ -n "$ROUTER_ARGS" ]] && router_args_opt=(--router-args "$ROUTER_ARGS")
 
 submit_out="$(sml advanced \
   --partition "$PARTITION" \
@@ -135,6 +161,8 @@ submit_out="$(sml advanced \
   --environment "$ENV_TOML" \
   --time "$TIME_LIMIT" \
   --served-model-name "$SERVED_MODEL_NAME" \
+  --router "$ROUTER" \
+  "${router_args_opt[@]}" \
   --framework-args "$FRAMEWORK_ARGS")"
 
 echo "$submit_out"
