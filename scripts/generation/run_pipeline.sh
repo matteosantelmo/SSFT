@@ -28,11 +28,11 @@
 # =============================================================================
 set -euo pipefail
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO="/iopsstor/scratch/cscs/msantelmo/SSFT"
 cd "$REPO"
 
 # ---- configuration (override via env) --------------------------------------
-INPUT_PARQUET=/users/msantelmo/scratch/SSFT/data/sft_reasoning_dataset/train.parquet
+INPUT_PARQUET=/iopsstor/scratch/cscs/msantelmo/SSFT/data/cap_filter/if/train.parquet
 PROJECT_NAME="capability-filtering"
 
 MODEL_PATH=/users/msantelmo/scratch/checkpoints/Apertus-1p5-8B-sft-capfilter-linear-it8816-thinking-token-fixed
@@ -55,7 +55,7 @@ STOP_ON_FIRST_CORRECT=on
 CORRECT_THRESHOLD="${CORRECT_THRESHOLD:-0.7}"
 TIME_LIMIT="${TIME_LIMIT:-12:00:00}"
 REPEATS=8
-REPLICAS=10
+REPLICAS=32
 NODES_PER_REPLICA=1
 TP_SIZE=1
 DP_SIZE=4
@@ -76,12 +76,15 @@ PARTITION="normal"
 RESERVATION="SD-69241-apertus-1-5-0"
 
 # client-side knobs (forwarded to src/generate.py)
+# Code verifiers (taco/apps/codeforces/...) run in the Kubernetes sandbox when
+# this is set; unset it to fall back to local prime_code execution.
+KUBERNETES_SANDBOX_URL="${KUBERNETES_SANDBOX_URL:-https://sandbox-dev.swissai.svc.cscs.ch}"
 SEED="85"
-CONCURRENCY="${CONCURRENCY:-512}"
+CONCURRENCY="${CONCURRENCY:-1024}"
 VERIFY_CONCURRENCY="${VERIFY_CONCURRENCY:-32}"
 TEMPERATURE="${TEMPERATURE:-0.8}"
 TOP_P="${TOP_P:-0.95}"
-MAX_TOKENS=16384
+MAX_TOKENS=4096
 START="${START:-0}"
 END="${END:-}"
 
@@ -144,6 +147,7 @@ echo "   output     : $OUTPUT_DIR"
 echo "   layout     : $REPLICAS replicas x $NODES_PER_REPLICA node (TP=$TP_SIZE, DP=$DP_SIZE -> $((REPLICAS * DP_SIZE)) engines), $FRAMEWORK, router=$ROUTER"
 echo "   client     : concurrency=$CONCURRENCY repeats=$REPEATS thinking=$THINKING"
 echo "   early stop : $STOP_ON_FIRST_CORRECT (correct threshold=$CORRECT_THRESHOLD)"
+echo "   sandbox    : ${KUBERNETES_SANDBOX_URL:-<none — local prime_code>}"
 echo "   chat tmpl  : ${CHAT_TEMPLATE:-<model-dir default>}"
 echo "   tokenizer  : ${TOKENIZER_PATH:-<model-dir default>}"
 echo "   partition  : $PARTITION  reservation: ${RESERVATION:-<none>}  time: $TIME_LIMIT"
@@ -187,7 +191,7 @@ KEEP_ALIVE="${KEEP_ALIVE:-0}"
 export REPO JOB_ID SERVED_MODEL_NAME INPUT_PARQUET OUTPUT_DIR \
   CONCURRENCY VERIFY_CONCURRENCY REPEATS SEED TEMPERATURE TOP_P MAX_TOKENS \
   SKIP_SPECIAL_TOKENS THINKING START END KEEP_ALIVE STOP_ON_FIRST_CORRECT \
-  CORRECT_THRESHOLD
+  CORRECT_THRESHOLD KUBERNETES_SANDBOX_URL
 
 client_submit="$(sbatch \
   --partition="$PARTITION" \
@@ -195,7 +199,7 @@ client_submit="$(sbatch \
   --cpus-per-task="$CLIENT_CPUS" \
   --time="$CLIENT_TIME" \
   --output="$OUTPUT_DIR/logs/client.log" \
-  "$REPO/scripts/client.sbatch")"
+  "$REPO/scripts/generation/client.sbatch")"
 echo "$client_submit"
 CLIENT_JOB_ID="$(echo "$client_submit" | awk '{print $NF}')"
 

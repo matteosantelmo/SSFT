@@ -31,7 +31,7 @@ from openai import AsyncOpenAI, OpenAI
 from tqdm import tqdm
 
 from serving import GATEWAY_URL, load_api_key, wait_for_model, wait_for_running
-from verifier import verify
+from verifier import REASON_CLOSE_TOKENS, verify
 
 RESULTS_FILENAME = "results.jsonl"
 
@@ -63,7 +63,7 @@ def _row_index(extra_info, fallback) -> str:
 
 
 _REASON_OPEN = ("<|inner_prefix|>", "<think>")
-_REASON_CLOSE = ("<|inner_suffix|>", "</think>")
+_REASON_CLOSE = REASON_CLOSE_TOKENS
 
 def split_reasoning(content: str | None):
     """Split content into (reasoning, answer). reasoning is None if no block."""

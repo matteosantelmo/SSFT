@@ -1,0 +1,70 @@
+# Dataset configuration used by data_preprocess.py. Fields omitted from a
+# dataset entry use the defaults defined by DatasetConfig.
+preprocessing:
+  output_dir: ./data/cap_filter/code
+  datasets_cache_dir: ./data/cap_filter/code/.hf_datasets_cache
+  seed: 85
+
+# Disable display_answers and use a prompt template instead:
+# tool_selection: []
+# prompt_template: |-
+#   Solve the following problem. End with "Answer: $ANSWER".
+#
+#   {question}
+
+# Enable thinking for all rows, or for a random fraction of rows (if not specified, thinking is disabled):  # all rows
+# enable_thinking: 0.5  # approximately half of the rows
+
+train_datasets:
+  - name: taco_verified
+    dataset_id: likaixin/TACO-verified
+    split: train
+    adapter: taco
+    data_source: taco
+    question_key: question
+    answer_key: input_output
+    solution_key: solutions
+    subject_key: source
+    prompt_template: |-
+      {question}
+
+      You may reason before answering. End your response with a Python 3 code block containing the complete solution.
+
+  - name: apps
+    dataset_id: ReactiveAI/codeparrot-apps-reupload
+    split: train
+    adapter: apps
+    data_source: apps
+    question_key: question
+    answer_key: input_output
+    solution_key: solutions
+    prompt_template: |-
+      {question}
+
+      You may reason before answering. End your response with a Python 3 code block containing the complete solution.
+
+  - name: code_contests
+    dataset_id: deepmind/code_contests
+    split: train
+    adapter: code_contests
+    data_source: codecontests
+    question_key: description
+    solution_key: solutions
+    prompt_template: |-
+      {question}
+
+      You may reason before answering. End your response with a Python 3 code block containing the complete solution.
+
+  - name: open_r1_codeforces
+    dataset_id: open-r1/codeforces
+    subset: verifiable
+    split: train
+    adapter: open_r1_codeforces
+    data_source: codeforces
+    prompt_template: |-
+      {question}
+
+      You may reason before answering. End your response with a Python 3 code block containing the complete solution.
+
+
+eval_datasets: []

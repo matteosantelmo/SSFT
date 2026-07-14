@@ -1,0 +1,41 @@
+# Dataset configuration used by data_preprocess.py. Fields omitted from a
+# dataset entry use the defaults defined by DatasetConfig.
+preprocessing:
+  output_dir: ./data/cap_filter/if
+  datasets_cache_dir: ./data/cap_filter/if/.hf_datasets_cache
+  seed: 85
+
+# Disable display_answers and use a prompt template instead:
+# tool_selection: []
+# prompt_template: |-
+#   Solve the following problem. End with "Answer: $ANSWER".
+#
+#   {question}
+
+# Enable thinking for all rows, or for a random fraction of rows (if not specified, thinking is disabled):
+# enable_thinking: 1.0  # all rows
+# enable_thinking: 0.5  # approximately half of the rows
+
+train_datasets:
+  - name: if_rl_singleturn
+    dataset_id: swiss-ai/if-rl-singleturn-prompts
+    split: train
+    adapter: if_data
+    data_source: swiss-ai/if-rl-singleturn-prompts
+    prompt_key: messages
+    answer_key: ground_truth
+    subject_key: constraint_type
+    sample_size: 100000
+
+  - name: if_rl_singleturn_hard
+    dataset_id: swiss-ai/if-rl-singleturn-hard-prompts
+    split: train
+    adapter: if_data
+    data_source: swiss-ai/if-rl-singleturn-hard-prompts
+    prompt_key: messages
+    answer_key: ground_truth
+    subject_key: constraint_type
+    sample_size: 50000
+
+
+eval_datasets: []
