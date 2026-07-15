@@ -32,18 +32,16 @@ REPO="/iopsstor/scratch/cscs/msantelmo/SSFT"
 cd "$REPO"
 
 # ---- configuration (override via env) --------------------------------------
-DOMAIN="code"
-
-INPUT_PARQUET=/iopsstor/scratch/cscs/msantelmo/SSFT/data/cap_filter/${DOMAIN}/train.parquet
+INPUT_PARQUET=/iopsstor/scratch/cscs/msantelmo/SSFT/data/cap_filter/math/train.parquet
 PROJECT_NAME="capability-filtering"
 
-# MODEL_PATH=/iopsstor/scratch/cscs/msantelmo/checkpoints/sft_0/Apertus-8B-2509__sft_0__sp2-lr5e-5-bs512-warmuplinear-lr_warmup_steps_ratio0.03__20260710-095910__global_step_11776
-# OUTPUT_DIR="/users/msantelmo/scratch/SSFT/outputs/capability-filtering/Apertus-8B-2509__sft_0__sp2-lr5e-5-bs512-warmuplinear-lr_warmup_steps_ratio0.03__20260710-095910__global_step_11776/${DOMAIN}"
-MODEL_PATH=/iopsstor/scratch/cscs/msantelmo/checkpoints/sft_0/apertus-1p5_8b_seq_len_256k_7000__sft_0_lr5e-5-ratio03__global_step_11264
-OUTPUT_DIR="/users/msantelmo/scratch/SSFT/outputs/capability-filtering/apertus-1p5_8b_seq_len_256k_7000__sft_0_lr5e-5-ratio03__global_step_11264/${DOMAIN}"
-TOKENIZER_PATH=${MODEL_PATH}
+# MODEL_PATH=/capstor/scratch/cscs/msantelmo/huggingface/hub/models--Qwen--Qwen3.6-27B/snapshots/6a9e13bd6fc8f0983b9b99948120bc37f49c13e9
+MODEL_PATH=/capstor/scratch/cscs/msantelmo/huggingface/hub/models--google--gemma-4-31b-it/snapshots/518276fb130dc81caf9a4f772e65e63ef2526493
+TOKENIZER_PATH=""
 CHAT_TEMPLATE=""
-THINKING=off
+THINKING=on
+FRAMEWORK=sglang  # sglang
+OUTPUT_DIR="/users/msantelmo/scratch/SSFT/outputs/teacher_gemma-4-31B/math"
 
 if [[ "$THINKING" == "on" ]]; then
   # Must be false to parse reasoning <|inner_prefix|>/<|inner_suffix|>
@@ -60,23 +58,31 @@ TIME_LIMIT="${TIME_LIMIT:-12:00:00}"
 REPEATS=8
 REPLICAS=32
 NODES_PER_REPLICA=1
-TP_SIZE=1
-DP_SIZE=4
+TP_SIZE=2
+DP_SIZE=2
 MAX_MODEL_LEN=32768
 GPU_MEM_UTIL=0.8
 
-FRAMEWORK="${FRAMEWORK:-sglang}"
 if [[ "$FRAMEWORK" == "sglang" ]]; then
   ENV_TOML="$REPO/model_launch/src/swiss_ai_model_launch/assets/envs/sglang.toml"
   ROUTER="sglang"
   ROUTER_ARGS="${ROUTER_ARGS:-}"
 else
-ENV_TOML="$REPO/model_launch/src/swiss_ai_model_launch/assets/envs/vllm_apertus_1.5.toml"
+  if [[ "${MODEL_PATH,,}" == *apertus* ]]; then
+    ENV_TOML="$REPO/model_launch/src/swiss_ai_model_launch/assets/envs/vllm_apertus_1.5.toml"
+  else
+    ENV_TOML="$REPO/model_launch/src/swiss_ai_model_launch/assets/envs/vllm.toml"
+  fi
   ROUTER="opentela"
   ROUTER_ARGS=""
 fi
 PARTITION="normal"
 RESERVATION="SD-69241-apertus-1-5-0"
+
+# Runs inside each replica's container (writable overlay) before vllm starts.
+# The image's transformers is too old for gemma-4 (`model type gemma4` not
+# recognized) — upgrade it at startup.
+PRE_LAUNCH_CMDS="${PRE_LAUNCH_CMDS:-python3 -m pip install --no-cache-dir --upgrade transformers}"
 
 # client-side knobs (forwarded to src/generate.py)
 # Code verifiers (taco/apps/codeforces/...) run in the Kubernetes sandbox when
@@ -87,7 +93,7 @@ CONCURRENCY="${CONCURRENCY:-1024}"
 VERIFY_CONCURRENCY="${VERIFY_CONCURRENCY:-32}"
 TEMPERATURE="${TEMPERATURE:-0.8}"
 TOP_P="${TOP_P:-0.95}"
-MAX_TOKENS=4096
+MAX_TOKENS=16384
 START="${START:-0}"
 END="${END:-}"
 
@@ -159,6 +165,9 @@ echo "============================================================"
 router_args_opt=()
 [[ -n "$ROUTER_ARGS" ]] && router_args_opt=(--router-args "$ROUTER_ARGS")
 
+pre_launch_opt=()
+[[ -n "$PRE_LAUNCH_CMDS" ]] && pre_launch_opt=(--pre-launch-cmds "$PRE_LAUNCH_CMDS")
+
 submit_out="$(sml advanced \
   --partition "$PARTITION" \
   "${reservation_args[@]}" \
@@ -170,6 +179,7 @@ submit_out="$(sml advanced \
   --served-model-name "$SERVED_MODEL_NAME" \
   --router "$ROUTER" \
   "${router_args_opt[@]}" \
+  "${pre_launch_opt[@]}" \
   --framework-args "$FRAMEWORK_ARGS")"
 
 echo "$submit_out"

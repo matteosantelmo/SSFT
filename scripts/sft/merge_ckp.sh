@@ -7,11 +7,13 @@ set -euo pipefail
 ###############################################################################
 
 # FSDP role checkpoint directory, e.g. .../global_step_260/actor.
-SOURCE_DIR="/iopsstor/scratch/cscs/msantelmo/SSFT/outputs/ssft/Apertus-8B-2509__sft_0__sp2-lr5e-5-bs512-warmuplinear-lr_warmup_steps_ratio0.03__20260710-095910/global_step_6656"
-TARGET_DIR="/iopsstor/scratch/cscs/msantelmo/checkpoints/sft_0/Apertus-8B-2509__sft_0__sp2-lr5e-5-bs512-warmuplinear-lr_warmup_steps_ratio0.03__20260710-095910"
+# SOURCE_DIR="/iopsstor/scratch/cscs/msantelmo/SSFT/outputs/ssft/Apertus-8B-2509__sft_0__sp2-lr5e-5-bs512-warmuplinear-lr_warmup_steps_ratio0.03__20260710-095910/global_step_11776"
+# TARGET_DIR="/iopsstor/scratch/cscs/msantelmo/checkpoints/sft_0/Apertus-8B-2509__sft_0__sp2-lr5e-5-bs512-warmuplinear-lr_warmup_steps_ratio0.03__20260710-095910__global_step_11776"
+# TOKENIZER_DIR="/iopsstor/scratch/cscs/msantelmo/checkpoints/Apertus-8B-Instruct-2509"
 
-# Tokenizer files copied into SOURCE_DIR/huggingface before merging when missing.
-TOKENIZER_DIR="/iopsstor/scratch/cscs/msantelmo/checkpoints/Apertus-8B-Instruct-2509"
+SOURCE_DIR="/iopsstor/scratch/cscs/msantelmo/SSFT/outputs/ssft/apertus-1p5_8b_seq_len_256k_7000_steps__sft_0__sp2-lr5e-5-bs512-warmuplinear-lr_warmup_steps_ratio0.03__20260713-102218/global_step_11264"
+TARGET_DIR="/iopsstor/scratch/cscs/msantelmo/checkpoints/sft_0/apertus-1p5_8b_seq_len_256k_7000_steps__sft_0__sp2-lr5e-5-bs512-warmuplinear-lr_warmup_steps_ratio0.03__20260713-102218__global_step_11264"
+TOKENIZER_DIR="/capstor/store/cscs/swissai/infra01/models/rleval/rl_1p5-8b-stage2_notools_mixthink_1606_480it"
 
 die() {
   echo "error: $*" >&2

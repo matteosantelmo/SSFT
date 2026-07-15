@@ -6,6 +6,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --time=04:00:00
+#SBATCH --reservation=SD-69241-apertus-1-5-0
 #
 # Re-grade an existing results.jsonl with the current verifiers (CPU-only).
 #

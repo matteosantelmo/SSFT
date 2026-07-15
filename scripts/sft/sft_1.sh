@@ -3,12 +3,13 @@
 #SBATCH --account=infra01
 #SBATCH --time=10:00:00
 #SBATCH --exclusive
-#SBATCH --nodes=40
+#SBATCH --nodes=24
 #SBATCH --gpus-per-node=4
 #SBATCH --ntasks-per-node=5
 #SBATCH --mem=460800
 #SBATCH --partition=normal
 #SBATCH --reservation=SD-69241-apertus-1-5-0
+#SBATCH --exclude=nid006634,nid006701,nid006948,nid006588,nid006629,nid006910,nid007254,nid007078,nid006619,nid006840,nid006905,nid006941,nid006947,nid006922,nid007074,nid007131,nid007189,nid007129,nid007184,nid007176,nid007177,nid007183,nid007090,nid007551,nid007531,nid007539,nid007558,nid006988,nid006990,nid006987,nid006989,nid007363,nid006606,nid007410,nid007096,nid007566,nid006774,nid007343,nid006867,nid007323,nid007489,nid006676,nid006677,nid007411,nid006848,nid006681,nid007626,nid007612,nid006887,nid006577,nid006729,nid006831,nid007520,nid007589,nid007614,nid006955,nid007592,nid007344,nid007374,nid007134,nid007628,nid007382,nid007141,nid007155,nid007286,nid006589,nid007024,nid007025
 
 set -ex
 
@@ -18,22 +19,24 @@ REPO_DIR="/iopsstor/scratch/cscs/msantelmo/SSFT"
 WORK_DIR="${REPO_DIR}/verl_sft"
 
 # Paths
-OUTPUT_ROOT="${OUTPUT_ROOT:-${REPO_DIR}/outputs}"
-DATASET_PATH="/iopsstor/scratch/cscs/msantelmo/SSFT/data/sft_0"
+OUTPUT_ROOT="${OUTPUT_ROOT:-${REPO_DIR}/outputs/sft_1}"
 
-# Model configuration
-
-## Apertus v1 - modified template from v1-Instruct
+## Apertus v1 from scratch
+# baseline
 MODEL_PATH="/iopsstor/scratch/cscs/msantelmo/checkpoints/Apertus-8B-2509"
 TOKENIZER_PATH="/iopsstor/scratch/cscs/msantelmo/checkpoints/Apertus-8B-Instruct-2509"
-
-## Apertus v1.5 before lc extension
-# MODEL_PATH="/capstor/store/cscs/swissai/infra01/hf-checkpoints/Apertus-1p5-8B-it430000"
-# TOKENIZER_PATH="/capstor/store/cscs/swissai/infra01/models/rleval/rl_1p5-8b-stage2_notools_mixthink_1606_480it"
-
-## Apertus v1.5 after lc extension
-# MODEL_PATH="/capstor/store/cscs/swissai/infra01/apertus_1p5/hf_checkpoints/apertus-1p5_8b_seq_len_256k_7000_steps"
-# TOKENIZER_PATH="/capstor/store/cscs/swissai/infra01/models/rleval/rl_1p5-8b-stage2_notools_mixthink_1606_480it"
+DATASET_PATH="/iopsstor/scratch/cscs/msantelmo/SSFT/data/sft_1/sft0+teacher-baseline"
+LEARNING_RATE="5e-5"
+# # cap-filter-fill
+# MODEL_PATH="/iopsstor/scratch/cscs/msantelmo/checkpoints/Apertus-8B-2509"
+# TOKENIZER_PATH="/iopsstor/scratch/cscs/msantelmo/checkpoints/Apertus-8B-Instruct-2509"
+# DATASET_PATH="/iopsstor/scratch/cscs/msantelmo/SSFT/data/sft_1/cap-filter-fill-apertus-8b-2509-sft0-step11776-mix-sft0"
+# LEARNING_RATE="5e-5"
+# # cap-filter-fill - smaller lr
+# MODEL_PATH="/iopsstor/scratch/cscs/msantelmo/checkpoints/Apertus-8B-2509"
+# TOKENIZER_PATH="/iopsstor/scratch/cscs/msantelmo/checkpoints/Apertus-8B-Instruct-2509"
+# DATASET_PATH="/iopsstor/scratch/cscs/msantelmo/SSFT/data/sft_1/cap-filter-fill-apertus-8b-2509-sft0-step11776-mix-sft0"
+# LEARNING_RATE="1e-5"
 
 CUSTOM_CLS_NAME="ApertusSFTDataset"
 MODEL_DTYPE="bfloat16"
@@ -45,20 +48,26 @@ VAL_BATCH_SIZE=512
 ROLLOUT_BATCH_SIZE=64
 ROLLOUT_MAX_LENGTH=4096
 TRAIN_FILE="train.parquet"
-VAL_FILE="val.parquet"
-ROLLOUT_FILE="test.parquet"
+VAL_PATH="/iopsstor/scratch/cscs/msantelmo/SSFT/data/sft_0/val.parquet"
+ROLLOUT_PATH="/iopsstor/scratch/cscs/msantelmo/SSFT/data/sft_1/test_think.parquet"  # NOTE: we use enable_thinking=true in evals
 USE_DYNAMIC_BSZ=true
 SEQ_PARALLEL=2  # set to >1 to enable sequence parallelism
 MAX_TOKEN_LEN_PER_GPU=16_384
 
 # Training configuration
-LEARNING_RATE="5e-5"
 WARMUP_STYLE="linear"
-LR_WARMUP_STEPS_RATIO=0.1
+LR_WARMUP_STEPS_RATIO=0.03
 TOTAL_EPOCHS=2
-TEST_FREQ=512
-SAVE_FREQ=512
-MAX_CKPT_TO_KEEP=15
+if [[ "$DATASET_PATH" == *"sft0+"* ]] || [[ "$DATASET_PATH" == *"mix-sft0"* ]]; then
+    TEST_FREQ=512
+    SAVE_FREQ=512
+else
+    TEST_FREQ=128
+    SAVE_FREQ=256
+fi
+ROLLOUT_NODES=8
+ROLLOUT_MAX_CONCURRENT_REQUESTS=2048
+MAX_CKPT_TO_KEEP=5
 TOTAL_TRAINING_STEPS=null
 WEIGHT_DECAY=0.0
 
@@ -74,21 +83,19 @@ CUSTOM_CLS_PATH="verl/utils/dataset/multiturn_sft_dataset.py"
 
 # Rollout evaluation
 ROLLOUT_MODEL_PATH="$MODEL_PATH"
-ROLLOUT_NODES=8
 ROLLOUT_TEMPERATURE=0.7
 ROLLOUT_TOP_P=0.95
 ROLLOUT_NUM_SAMPLES=64
-ROLLOUT_MAX_CONCURRENT_REQUESTS=1024
 
 # Logging
 LOGGER='["console","wandb"]'
 WANDB_MODE="${WANDB_MODE:-online}"
 
 # Generate run name and experiment name from key parameters
-MODEL_NAME=$(basename "$MODEL_PATH")
+MODEL_NAME=${MODEL_ALIAS:-$(basename "$MODEL_PATH")}
 DATASET_NAME=$(basename "$DATASET_PATH")
 RUN_NAME="${RUN_NAME:-${MODEL_NAME}__${DATASET_NAME}__sp${SEQ_PARALLEL}-lr${LEARNING_RATE}-bs${TRAIN_BATCH_SIZE}-warmup${WARMUP_STYLE}-lr_warmup_steps_ratio${LR_WARMUP_STEPS_RATIO}__$(date '+%Y%m%d-%H%M%S')}"
-RUN_DIR="${RUN_DIR:-${OUTPUT_ROOT}/${PROJECT_NAME}/${RUN_NAME}}"
+RUN_DIR="${RUN_DIR:-${OUTPUT_ROOT}/${RUN_NAME}}"
 LOG_DIR="${RUN_DIR}/logs"
 
 # Environment
@@ -116,7 +123,7 @@ save_path="$RUN_DIR"
 dataset_path=$DATASET_PATH
 
 mkdir -p "$save_path" "$LOG_DIR"
-cp "$0" "$save_path/sft_0.sh"
+cp "$0" "$save_path/sft_1.sh"
 
 # Build project wheel once on the head node and store it in a shared location
 WHEEL_DIR="$save_path/wheels"
@@ -190,8 +197,8 @@ $verifier_check_command
 torchrun --nnodes=$TRAINING_NODES --nproc_per_node=4 --node_rank=$local_rank --master_addr=$head_node_ip --master_port=$MASTER_PORT \
     -m verl.trainer.sft_trainer \
     data.train_files=$dataset_path/$TRAIN_FILE \
-    data.val_files=$dataset_path/$VAL_FILE \
-    data.rollout_files=$dataset_path/$ROLLOUT_FILE \
+    data.val_files=$VAL_PATH \
+    data.rollout_files=$ROLLOUT_PATH \
     data.messages_key=$MESSAGES_KEY \
     data.tools_key=$TOOLS_KEY \
     data.enable_thinking_key=$ENABLE_THINKING_KEY \
