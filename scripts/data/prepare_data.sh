@@ -7,6 +7,7 @@ set -euo pipefail
 # ...
 
 # Create the train-time evals data based on the configs (used both for SFT and RLVR)
+python verl_rl/apertus/data_preprocess.py --config scripts/data/data_config/rl_0.yaml
 python verl_rl/apertus/data_preprocess.py --config scripts/data/data_config/evals-small_nothink_nodisplay.yaml
 python verl_rl/apertus/data_preprocess.py --config scripts/data/data_config/evals-full_nothink_nodisplay.yaml
 python verl_rl/apertus/data_preprocess.py --config scripts/data/data_config/evals-small_think_nodisplay.yaml
@@ -56,6 +57,7 @@ python scripts/data/build_reasoning_sft_dataset.py \
 # cap-filter datasets, one set per student model (append new runs here to repeat)
 declare -A STUDENT_RESULTS=(
     [apertus-8b-2509-sft0-step11776]="outputs/capability-filtering/Apertus-8B-2509__sft_0__sp2-lr5e-5-bs512-warmuplinear-lr_warmup_steps_ratio0.03__20260710-095910__global_step_11776"
+    [apertus-1p5_8b-sft0-step11264]="outputs/capability-filtering/apertus-1p5_8b_seq_len_256k_7000__sft_0_lr5e-5-ratio03__global_step_11264"
 )
 
 for model in "${!STUDENT_RESULTS[@]}"; do

@@ -65,8 +65,23 @@ def _row_index(extra_info, fallback) -> str:
 _REASON_OPEN = ("<|inner_prefix|>", "<think>")
 _REASON_CLOSE = REASON_CLOSE_TOKENS
 
+def _first_close(text: str) -> tuple[int, int]:
+    """Return (index, length) of the earliest closing reasoning token, or (-1, 0)."""
+    hi, hi_len = -1, 0
+    for m in _REASON_CLOSE:
+        j = text.find(m)
+        if j != -1 and (hi == -1 or j < hi):
+            hi, hi_len = j, len(m)
+    return hi, hi_len
+
+
 def split_reasoning(content: str | None):
-    """Split content into (reasoning, answer). reasoning is None if no block."""
+    """Split content into (reasoning, answer). reasoning is None if no block.
+
+    Also handles templates that pre-open the thinking block in the generation
+    prompt (MiniMax-M2, DeepSeek-V4): the output then carries only a closing
+    token, and everything before it is reasoning.
+    """
     text = content or ""
     lo, lo_tok = -1, ""
     for m in _REASON_OPEN:
@@ -74,13 +89,12 @@ def split_reasoning(content: str | None):
         if i != -1 and (lo == -1 or i < lo):
             lo, lo_tok = i, m
     if lo == -1:
-        return None, text  # no reasoning block -> all answer
+        hi, hi_len = _first_close(text)
+        if hi == -1:
+            return None, text  # no reasoning block -> all answer
+        return text[:hi], text[hi + hi_len:]
     rest = text[lo + len(lo_tok):]
-    hi, hi_len = -1, 0
-    for m in _REASON_CLOSE:
-        j = rest.find(m)
-        if j != -1 and (hi == -1 or j < hi):
-            hi, hi_len = j, len(m)
+    hi, hi_len = _first_close(rest)
     if hi == -1:
         return rest, ""  # opened but never closed -> no usable answer
     return rest[:hi], rest[hi + hi_len:]
@@ -226,7 +240,14 @@ async def process_item(
             )
 
         choice = resp.choices[0]
-        reasoning, answer = split_reasoning(choice.message.content)
+        # Server-side reasoning parsers (--reasoning-parser deepseek_v4 /
+        # minimax_m2_append_think) already separate reasoning from the answer;
+        # otherwise fall back to splitting the raw content on the markers.
+        reasoning = getattr(choice.message, "reasoning_content", None)
+        if reasoning:
+            answer = choice.message.content or ""
+        else:
+            reasoning, answer = split_reasoning(choice.message.content)
         record["response"] = answer  # the answer (post-reasoning) is what gets scored
         record["reasoning"] = reasoning
         record["missing_reasoning"] = bool(enable_thinking and not reasoning)
@@ -279,10 +300,15 @@ async def run(args, items: list[dict], results_path: str) -> None:
         "top_p": args.top_p,
         "max_tokens": args.max_tokens,
     }
-    extra_body_base = {
-        "skip_special_tokens": args.skip_special_tokens,
-        "chat_template_kwargs": {"enable_thinking": args.enable_thinking},
-    }
+    extra_body_base = {"skip_special_tokens": args.skip_special_tokens}
+    if args.chat_template_kwargs is not None:
+        chat_template_kwargs = json.loads(args.chat_template_kwargs)
+    else:
+        chat_template_kwargs = {"enable_thinking": args.enable_thinking}
+    if chat_template_kwargs:
+        extra_body_base["chat_template_kwargs"] = chat_template_kwargs
+    if args.top_k is not None:
+        extra_body_base["top_k"] = args.top_k
 
     async def process(it: dict) -> dict:
         return await process_item(
@@ -360,9 +386,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--end", type=int, default=None, help="Last row (exclusive); default = end of file.")
     p.add_argument("--temperature", type=float, default=0.7)
     p.add_argument("--top-p", type=float, default=0.95)
+    p.add_argument("--top-k", type=int, default=None,
+                   help="top_k sampling, sent via extra_body (vLLM/sglang extension); omit to disable.")
     p.add_argument("--max-tokens", type=int, default=2048)
     p.add_argument("--enable-thinking", type=_str2bool, default=False,
                    help="Global thinking flag sent as chat_template_kwargs.enable_thinking for all samples.")
+    p.add_argument("--chat-template-kwargs", default=None,
+                   help='JSON dict replacing the default {"enable_thinking": ...} chat_template_kwargs '
+                        '(model templates differ, e.g. DeepSeek-V4 uses {"thinking": true}). '
+                        'Pass {} to send no chat_template_kwargs at all.')
     p.add_argument("--skip-special-tokens", type=_str2bool, default=True,
                    help="vLLM skip_special_tokens. false keeps markers (e.g. <|inner_prefix|>) in the response.")
     p.add_argument("--max-retries", type=int, default=6, help="OpenAI client retry budget per request.")

@@ -32,16 +32,17 @@ REPO="/iopsstor/scratch/cscs/msantelmo/SSFT"
 cd "$REPO"
 
 # ---- configuration (override via env) --------------------------------------
-INPUT_PARQUET=/iopsstor/scratch/cscs/msantelmo/SSFT/data/cap_filter/math/train.parquet
+DOMAIN=code
+INPUT_PARQUET=/iopsstor/scratch/cscs/msantelmo/SSFT/data/cap_filter/${DOMAIN}/train.parquet
 PROJECT_NAME="capability-filtering"
 
 # MODEL_PATH=/capstor/scratch/cscs/msantelmo/huggingface/hub/models--Qwen--Qwen3.6-27B/snapshots/6a9e13bd6fc8f0983b9b99948120bc37f49c13e9
-MODEL_PATH=/capstor/scratch/cscs/msantelmo/huggingface/hub/models--google--gemma-4-31b-it/snapshots/518276fb130dc81caf9a4f772e65e63ef2526493
+MODEL_PATH=/capstor/store/cscs/swissai/infra01/hf_models/models/MiniMaxAI/MiniMax-M2.7
+OUTPUT_DIR="/users/msantelmo/scratch/SSFT/outputs/teacher_MiniMax-M2.7/${DOMAIN}"
 TOKENIZER_PATH=""
 CHAT_TEMPLATE=""
 THINKING=on
 FRAMEWORK=sglang  # sglang
-OUTPUT_DIR="/users/msantelmo/scratch/SSFT/outputs/teacher_gemma-4-31B/math"
 
 if [[ "$THINKING" == "on" ]]; then
   # Must be false to parse reasoning <|inner_prefix|>/<|inner_suffix|>
@@ -58,10 +59,61 @@ TIME_LIMIT="${TIME_LIMIT:-12:00:00}"
 REPEATS=8
 REPLICAS=32
 NODES_PER_REPLICA=1
-TP_SIZE=2
-DP_SIZE=2
+TP_SIZE=""
+DP_SIZE=""
 MAX_MODEL_LEN=32768
 GPU_MEM_UTIL=0.8
+
+# ---- model-family presets ----------------------------------------------------
+# DeepSeek-V4-Flash (284B-A13B, FP4 experts + FP8, ~149GB) and MiniMax-M2.7
+# (230B-A10B, FP8, ~215GB) both fit on ONE 4xGH200 node (4x96GB), so replicas
+# stay single-node (no cross-node TP) and throughput scales via REPLICAS.
+# Presets follow the vendor/vLLM-recipe serving commands; sampling defaults are
+# the model-card recommendations (override via env as usual).
+TOP_K="${TOP_K:-}"
+CHAT_TEMPLATE_KWARGS="${CHAT_TEMPLATE_KWARGS:-}"
+EXTRA_FRAMEWORK_ARGS="${EXTRA_FRAMEWORK_ARGS:-}"
+case "$(basename "$MODEL_PATH")" in
+  [Dd]eep[Ss]eek-V4*)
+    FRAMEWORK=vllm
+    NODES_PER_REPLICA=1
+    # MLA-style attention (1 KV head): TP would replicate the KV cache on every
+    # rank, so the vLLM recipe recommends DP attention + EP experts instead.
+    # Fallback if the DP path misbehaves: TP_SIZE=4 DP_SIZE=1 (keep EP on).
+    TP_SIZE=1
+    DP_SIZE=4
+    EXTRA_FRAMEWORK_ARGS="--enable-expert-parallel --kv-cache-dtype fp8 --block-size 256 \
+      --tokenizer-mode deepseek_v4 --reasoning-parser deepseek_v4 \
+      --tool-call-parser deepseek_v4 --enable-auto-tool-choice"
+    SKIP_SPECIAL_TOKENS=true  # reasoning comes back separately via the parser
+    TEMPERATURE="${TEMPERATURE:-1.0}"
+    TOP_P="${TOP_P:-1.0}"
+    # thinking modes: {"thinking": false} = non-think, {"thinking": true} = think
+    # high; think max additionally needs {"reasoning_effort": "max"} + >=384K ctx.
+    if [[ "$THINKING" == "on" ]]; then
+      CHAT_TEMPLATE_KWARGS='{"thinking": true}'
+    else
+      CHAT_TEMPLATE_KWARGS='{"thinking": false}'
+    fi
+    PRE_LAUNCH_CMDS=""  # stock vllm image serves deepseek_v4; don't touch transformers
+    ;;
+  [Mm]ini[Mm]ax-M2*)
+    FRAMEWORK=vllm
+    NODES_PER_REPLICA=1
+    TP_SIZE=4
+    DP_SIZE=1
+    GPU_MEM_UTIL=0.85
+    EXTRA_FRAMEWORK_ARGS="--reasoning-parser minimax_m2_append_think \
+      --tool-call-parser minimax_m2 --enable-auto-tool-choice"
+    SKIP_SPECIAL_TOKENS=true
+    TEMPERATURE="${TEMPERATURE:-1.0}"
+    TOP_P="${TOP_P:-0.95}"
+    TOP_K="${TOP_K:-40}"
+    CHAT_TEMPLATE_KWARGS='{}'  # template always opens <think>; there is no toggle
+    [[ "$THINKING" != "on" ]] && echo "[warn] MiniMax-M2 always thinks; THINKING=$THINKING has no effect." >&2
+    PRE_LAUNCH_CMDS=""
+    ;;
+esac
 
 if [[ "$FRAMEWORK" == "sglang" ]]; then
   ENV_TOML="$REPO/model_launch/src/swiss_ai_model_launch/assets/envs/sglang.toml"
@@ -81,15 +133,17 @@ RESERVATION="SD-69241-apertus-1-5-0"
 
 # Runs inside each replica's container (writable overlay) before vllm starts.
 # The image's transformers is too old for gemma-4 (`model type gemma4` not
-# recognized) — upgrade it at startup.
-PRE_LAUNCH_CMDS="${PRE_LAUNCH_CMDS:-python3 -m pip install --no-cache-dir --upgrade transformers}"
+# recognized) — upgrade it at startup. 
+PRE_LAUNCH_CMDS="${PRE_LAUNCH_CMDS-python3 -m pip install --no-cache-dir --upgrade transformers}"
 
 # client-side knobs (forwarded to src/generate.py)
 # Code verifiers (taco/apps/codeforces/...) run in the Kubernetes sandbox when
 # this is set; unset it to fall back to local prime_code execution.
 KUBERNETES_SANDBOX_URL="${KUBERNETES_SANDBOX_URL:-https://sandbox-dev.swissai.svc.cscs.ch}"
 SEED="85"
-CONCURRENCY="${CONCURRENCY:-1024}"
+
+MAX_RETRIES="${MAX_RETRIES:-2}"
+CONCURRENCY="${CONCURRENCY:-512}"
 VERIFY_CONCURRENCY="${VERIFY_CONCURRENCY:-32}"
 TEMPERATURE="${TEMPERATURE:-0.8}"
 TOP_P="${TOP_P:-0.95}"
@@ -108,7 +162,7 @@ fi
 source "$REPO/.venv/bin/activate"
 
 # ---- output dir ------------------------------------------------------------
-SERVED_MODEL_NAME=$(basename "$MODEL_PATH")${THINKING_TAG}-$USER
+SERVED_MODEL_NAME=$(basename "$MODEL_PATH")${THINKING_TAG}-${DOMAIN}-$USER
 MODEL_NAME="$(basename "$MODEL_PATH")"
 DATASET_NAME="$(basename "$(dirname "$INPUT_PARQUET")")"
 STAMP="$(date +%Y%m%d-%H%M%S)"
@@ -143,6 +197,7 @@ FRAMEWORK_ARGS="--model $MODEL_PATH \
 [[ -n "$CHAT_TEMPLATE" ]] && FRAMEWORK_ARGS="$FRAMEWORK_ARGS --chat-template $CHAT_TEMPLATE"
 [[ -n "$TOKENIZER_PATH" ]] && FRAMEWORK_ARGS="$FRAMEWORK_ARGS --tokenizer $TOKENIZER_PATH"
 fi
+[[ -n "$EXTRA_FRAMEWORK_ARGS" ]] && FRAMEWORK_ARGS="$FRAMEWORK_ARGS $EXTRA_FRAMEWORK_ARGS"
 
 ########################################
 # 1. launch serving 
@@ -154,7 +209,8 @@ echo "   served as  : $SERVED_MODEL_NAME"
 echo "   input      : $INPUT_PARQUET"
 echo "   output     : $OUTPUT_DIR"
 echo "   layout     : $REPLICAS replicas x $NODES_PER_REPLICA node (TP=$TP_SIZE, DP=$DP_SIZE -> $((REPLICAS * DP_SIZE)) engines), $FRAMEWORK, router=$ROUTER"
-echo "   client     : concurrency=$CONCURRENCY repeats=$REPEATS thinking=$THINKING"
+echo "   client     : concurrency=$CONCURRENCY max_retries=$MAX_RETRIES repeats=$REPEATS thinking=$THINKING"
+echo "   sampling   : temp=$TEMPERATURE top_p=$TOP_P top_k=${TOP_K:-<off>} max_tokens=$MAX_TOKENS tmpl_kwargs=${CHAT_TEMPLATE_KWARGS:-<default>}"
 echo "   early stop : $STOP_ON_FIRST_CORRECT (correct threshold=$CORRECT_THRESHOLD)"
 echo "   sandbox    : ${KUBERNETES_SANDBOX_URL:-<none — local prime_code>}"
 echo "   chat tmpl  : ${CHAT_TEMPLATE:-<model-dir default>}"
@@ -202,9 +258,9 @@ CLIENT_CPUS="${CLIENT_CPUS:-32}"
 KEEP_ALIVE="${KEEP_ALIVE:-0}"
 
 export REPO JOB_ID SERVED_MODEL_NAME INPUT_PARQUET OUTPUT_DIR \
-  CONCURRENCY VERIFY_CONCURRENCY REPEATS SEED TEMPERATURE TOP_P MAX_TOKENS \
-  SKIP_SPECIAL_TOKENS THINKING START END KEEP_ALIVE STOP_ON_FIRST_CORRECT \
-  CORRECT_THRESHOLD KUBERNETES_SANDBOX_URL
+  CONCURRENCY VERIFY_CONCURRENCY REPEATS SEED TEMPERATURE TOP_P TOP_K MAX_TOKENS \
+  SKIP_SPECIAL_TOKENS THINKING CHAT_TEMPLATE_KWARGS START END KEEP_ALIVE \
+  STOP_ON_FIRST_CORRECT CORRECT_THRESHOLD KUBERNETES_SANDBOX_URL MAX_RETRIES
 
 client_submit="$(sbatch \
   --partition="$PARTITION" \

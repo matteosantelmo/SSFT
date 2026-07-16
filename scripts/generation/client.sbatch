@@ -18,6 +18,12 @@ case "${STOP_ON_FIRST_CORRECT:-0}" in
   1|true|yes|on) early_stop_arg=(--stop-on-first-correct) ;;
 esac
 
+# optional per-model sampling / template / retry knobs
+extra_args=()
+[[ -n "${TOP_K:-}" ]] && extra_args+=(--top-k "$TOP_K")
+[[ -n "${CHAT_TEMPLATE_KWARGS:-}" ]] && extra_args+=(--chat-template-kwargs "$CHAT_TEMPLATE_KWARGS")
+[[ -n "${MAX_RETRIES:-}" ]] && extra_args+=(--max-retries "$MAX_RETRIES")
+
 python "$REPO/src/generate.py" \
   --job-id "$JOB_ID" \
   --served-model-name "$SERVED_MODEL_NAME" \
@@ -33,7 +39,7 @@ python "$REPO/src/generate.py" \
   --max-tokens "$MAX_TOKENS" \
   --enable-thinking "$THINKING" \
   --skip-special-tokens "$SKIP_SPECIAL_TOKENS" \
-  --start "$START" "${end_arg[@]}"
+  --start "$START" "${end_arg[@]}" "${extra_args[@]}"
 client_rc=$?
 
 # Keep the service up after the client finishes unless asked to tear it down.

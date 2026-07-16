@@ -1,0 +1,229 @@
+# Dataset configuration used by data_preprocess.py. Fields omitted from a
+# dataset entry use the defaults defined by DatasetConfig.
+preprocessing:
+  output_dir: ./data/rl
+  datasets_cache_dir: ./data/rl/.hf_datasets_cache
+  seed: 85
+
+# Disable display_answers and use a prompt template instead:
+# tool_selection: []
+# prompt_template: |-
+#   Solve the following problem. End with "Answer: $ANSWER".
+#
+#   {question}
+
+# Enable thinking for all rows, or for a random fraction of rows (if not specified, thinking is disabled):
+# enable_thinking: 1.0  # all rows
+# enable_thinking: 0.5  # approximately half of the rows
+
+train_datasets:
+
+  - name: big_math_rl_verified
+    dataset_id: SynthLabsAI/Big-Math-RL-Verified
+    enable_thinking: 1.0
+    split: train
+    adapter: math
+    data_source: SynthLabsAI/Big-Math-RL-Verified
+    subject_key: domain
+
+  - name: deepmath103k
+    dataset_id: zwhe99/DeepMath-103K
+    enable_thinking: 1.0
+    split: train
+    adapter: math
+    data_source: zwhe99/DeepMath-103K
+    question_key: question
+    answer_key: final_answer
+    solution_key: r1_solution_1
+    subject_key: topic
+
+  - name: if_rl_singleturn
+    dataset_id: swiss-ai/if-rl-singleturn-prompts
+    enable_thinking: 1.0
+    split: train
+    adapter: if_data
+    data_source: swiss-ai/if-rl-singleturn-prompts
+    prompt_key: messages
+    answer_key: ground_truth
+    subject_key: constraint_type
+
+  - name: if_rl_singleturn_hard
+    dataset_id: swiss-ai/if-rl-singleturn-hard-prompts
+    enable_thinking: 1.0
+    split: train
+    adapter: if_data
+    data_source: swiss-ai/if-rl-singleturn-hard-prompts
+    prompt_key: messages
+    answer_key: ground_truth
+    subject_key: constraint_type
+
+  - name: taco_verified
+    dataset_id: likaixin/TACO-verified
+    enable_thinking: 1.0
+    split: train
+    adapter: taco
+    data_source: taco
+    question_key: question
+    answer_key: input_output
+    solution_key: solutions
+    subject_key: source
+    prompt_template: |-
+      {question}
+
+      You may reason before answering. End your response with a Python 3 code block containing the complete solution.
+
+  - name: apps
+    dataset_id: ReactiveAI/codeparrot-apps-reupload
+    enable_thinking: 1.0
+    split: train
+    adapter: apps
+    data_source: apps
+    question_key: question
+    answer_key: input_output
+    solution_key: solutions
+    prompt_template: |-
+      {question}
+
+      You may reason before answering. End your response with a Python 3 code block containing the complete solution.
+
+  - name: code_contests
+    dataset_id: deepmind/code_contests
+    enable_thinking: 1.0
+    split: train
+    adapter: code_contests
+    data_source: codecontests
+    question_key: description
+    solution_key: solutions
+    prompt_template: |-
+      {question}
+
+      You may reason before answering. End your response with a Python 3 code block containing the complete solution.
+
+  - name: open_r1_codeforces
+    dataset_id: open-r1/codeforces
+    enable_thinking: 1.0
+    subset: verifiable
+    split: train
+    adapter: open_r1_codeforces
+    data_source: codeforces
+    prompt_template: |-
+      {question}
+
+      You may reason before answering. End your response with a Python 3 code block containing the complete solution.
+
+
+eval_datasets:
+  - name: gsm8k
+    dataset_id: openai/gsm8k
+    subset: main
+    split: test
+    adapter: gsm8k
+    data_source: openai/gsm8k
+    question_key: question
+    sample_size: 100
+    enable_thinking: 1.0
+    prompt_template: |-
+      {question}
+
+      You may reason before answering. Give your final answer in \boxed{}.
+
+  - name: math500
+    dataset_id: HuggingFaceH4/MATH-500
+    split: test
+    adapter: math
+    data_source: HuggingFaceH4/MATH-500
+    subject_key: subject
+    solution_key: solution
+    sample_size: 100
+    enable_thinking: 1.0
+    prompt_template: |-
+      {question}
+
+      You may reason before answering. Give your final answer in \boxed{}.
+
+  - name: aime2024
+    dataset_id: HuggingFaceH4/aime_2024
+    split: train
+    adapter: math
+    data_source: aime2024
+    solution_key: solution
+    enable_thinking: 1.0
+    prompt_template: |-
+      {question}
+
+      You may reason before answering. Give your final answer in \boxed{}.
+
+  - name: aime2025
+    dataset_id: math-ai/aime25
+    split: test
+    adapter: math
+    data_source: aime2025
+    enable_thinking: 1.0
+    prompt_template: |-
+      {question}
+
+      You may reason before answering. Give your final answer in \boxed{}.
+
+  - name: gpqa_diamond
+    dataset_id: Idavidrein/gpqa
+    subset: gpqa_diamond
+    split: train
+    adapter: gpqa
+    data_source: gpqa_diamond
+    question_key: Question
+    answer_key: Correct Answer
+    shuffle_choices: true
+    sample_size: 100
+    enable_thinking: 1.0
+    prompt_template: |-
+      {question}
+
+      You may reason before answering. Give your final answer as "Answer: $letter".
+
+  - name: mmlu
+    dataset_id: cais/mmlu
+    subset: all
+    split: test
+    adapter: multiple_choice
+    data_source: mmlu
+    question_key: question
+    subject_key: subject
+    sample_size: 100
+    enable_thinking: 1.0
+    prompt_template: |-
+      {question}
+
+      You may reason before answering. Give your final answer as "Answer: $letter".
+
+  - name: openai_humaneval
+    dataset_id: openai/openai_humaneval
+    subset: openai_humaneval
+    split: test
+    adapter: humaneval
+    data_source: humaneval
+    question_key: prompt
+    answer_key: test
+    solution_key: canonical_solution
+    prompt_key: entry_point
+    sample_size: 100
+    enable_thinking: 1.0
+    prompt_template: |-
+      {question}
+
+      You may reason before answering. End your response with a Python 3 code block containing the complete solution.
+
+  - name: ifeval
+    dataset_id: google/IFEval
+    split: train
+    adapter: if_eval
+    data_source: google/IFEval
+    sample_size: 100
+    enable_thinking: 1.0
+
+  - name: ifbench
+    dataset_id: allenai/IFBench_test
+    split: train
+    adapter: if_eval
+    data_source: allenai/IFBench_test
+    sample_size: 100
+    enable_thinking: 1.0
