@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Scalable generation + verification pipeline for SSFT.
 
-Given a verl-format parquet of prompts, this:
+Given one or more verl-format parquets of prompts, this:
   1. waits for the sml serving job + model to be ready (gateway load-balances
      across all replicas under one served-model-name);
   2. generates responses with high async concurrency through the OpenAI API;
@@ -361,7 +361,8 @@ async def run(args, items: list[dict], results_path: str) -> None:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Generate + verify responses for a verl-format parquet.")
-    p.add_argument("--input", required=True, help="Input parquet (verl format).")
+    p.add_argument("--input", required=True, nargs="+",
+                   help="Input parquet(s) (verl format); multiple are concatenated.")
     p.add_argument("--served-model-name", required=True, help="Model id to query on the gateway.")
     p.add_argument("--output-dir", required=True, help="Run dir; results.jsonl written here.")
     p.add_argument("--job-id", type=int, default=None, help="Slurm job id to watch (fail fast).")
@@ -382,8 +383,9 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--seed", type=int, default=0,
                    help="Base request seed; repeat i uses seed+i so repeats diverge yet stay reproducible.")
-    p.add_argument("--start", type=int, default=0, help="First row (inclusive).")
-    p.add_argument("--end", type=int, default=None, help="Last row (exclusive); default = end of file.")
+    p.add_argument("--start", type=int, default=0, help="First row (inclusive), per input file.")
+    p.add_argument("--end", type=int, default=None,
+                   help="Last row (exclusive), per input file; default = end of file.")
     p.add_argument("--temperature", type=float, default=0.7)
     p.add_argument("--top-p", type=float, default=0.95)
     p.add_argument("--top-k", type=int, default=None,
@@ -398,8 +400,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--skip-special-tokens", type=_str2bool, default=True,
                    help="vLLM skip_special_tokens. false keeps markers (e.g. <|inner_prefix|>) in the response.")
     p.add_argument("--max-retries", type=int, default=6, help="OpenAI client retry budget per request.")
-    p.add_argument("--job-timeout", type=int, default=1800)
-    p.add_argument("--ready-timeout", type=int, default=1800)
+    p.add_argument("--job-timeout", type=int, default=2400)
+    p.add_argument("--ready-timeout", type=int, default=2400)
     return p.parse_args()
 
 
@@ -408,12 +410,23 @@ def main() -> None:
     os.makedirs(args.output_dir, exist_ok=True)
     results_path = os.path.join(args.output_dir, RESULTS_FILENAME)
 
-    df = pd.read_parquet(args.input)
-    end = args.end if args.end is not None else len(df)
-    df = df.iloc[args.start:end].reset_index(drop=True)
-    print(f"[input] {args.input}: rows [{args.start}:{end}] -> {len(df)} prompts")
+    frames = []
+    for path in args.input:
+        df = pd.read_parquet(path)
+        end = args.end if args.end is not None else len(df)
+        df = df.iloc[args.start:end]
+        print(f"[input] {path}: rows [{args.start}:{end}] -> {len(df)} prompts")
+        frames.append(df)
+    df = pd.concat(frames, ignore_index=True)
+    if len(args.input) > 1:
+        print(f"[input] {len(args.input)} files -> {len(df)} prompts total")
 
     items = build_work_items(df, args.repeats, args.seed)
+    # ids key the results.jsonl resume logic, so collisions would silently drop work.
+    ids = [it["id"] for it in items]
+    if len(set(ids)) != len(ids):
+        sys.exit("[fatal] duplicate work-item ids across inputs — check for a repeated "
+                 "(data_source, extra_info.index) pair in the input parquets.")
     completed = load_completed_results(results_path)
     if completed:
         before = len(items)

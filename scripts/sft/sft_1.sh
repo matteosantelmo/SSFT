@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=sft
 #SBATCH --account=infra01
-#SBATCH --time=10:00:00
+#SBATCH --time=12:00:00
 #SBATCH --exclusive
 #SBATCH --nodes=24
 #SBATCH --gpus-per-node=4
@@ -9,7 +9,7 @@
 #SBATCH --mem=460800
 #SBATCH --partition=normal
 #SBATCH --reservation=SD-69241-apertus-1-5-0
-#SBATCH --exclude=nid006634,nid006701,nid006948,nid006588,nid006629,nid006910,nid007254,nid007078,nid006619,nid006840,nid006905,nid006941,nid006947,nid006922,nid007074,nid007131,nid007189,nid007129,nid007184,nid007176,nid007177,nid007183,nid007090,nid007551,nid007531,nid007539,nid007558,nid006988,nid006990,nid006987,nid006989,nid007363,nid006606,nid007410,nid007096,nid007566,nid006774,nid007343,nid006867,nid007323,nid007489,nid006676,nid006677,nid007411,nid006848,nid006681,nid007626,nid007612,nid006887,nid006577,nid006729,nid006831,nid007520,nid007589,nid007614,nid006955,nid007592,nid007344,nid007374,nid007134,nid007628,nid007382,nid007141,nid007155,nid007286,nid006589,nid007024,nid007025
+#SBATCH --exclude=nid006634,nid006701,nid006948,nid006588,nid006629,nid006910,nid007254,nid007078,nid006619,nid006840,nid006905,nid006941,nid006947,nid006922,nid007074,nid007131,nid007189,nid007129,nid007184,nid007176,nid007177,nid007183,nid007090,nid007551,nid007531,nid007539,nid007558,nid006988,nid006990,nid006987,nid006989,nid007363,nid006606,nid007410,nid007096,nid007566,nid006774,nid007343,nid006867,nid007323,nid007489,nid006676,nid006677,nid007411,nid006848,nid006681,nid007626,nid007612,nid006887,nid006577,nid006729,nid006831,nid007520,nid007589,nid007614,nid006955,nid007592,nid007344,nid007374,nid007134,nid007628,nid007382,nid007141,nid007155,nid007286,nid006589,nid007024,nid007025,nid006065,nid006076,nid006080,nid006081,nid006082,nid006085,nid006086
 
 set -ex
 
@@ -22,21 +22,45 @@ WORK_DIR="${REPO_DIR}/verl_sft"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${REPO_DIR}/outputs/sft_1}"
 
 ## Apertus v1 from scratch
-# baseline
-MODEL_PATH="/iopsstor/scratch/cscs/msantelmo/checkpoints/Apertus-8B-2509"
-TOKENIZER_PATH="/iopsstor/scratch/cscs/msantelmo/checkpoints/Apertus-8B-Instruct-2509"
-DATASET_PATH="/iopsstor/scratch/cscs/msantelmo/SSFT/data/sft_1/sft0+teacher-baseline"
-LEARNING_RATE="5e-5"
+# # baseline
+# MODEL_PATH="/iopsstor/scratch/cscs/msantelmo/checkpoints/Apertus-8B-2509"
+# TOKENIZER_PATH="/iopsstor/scratch/cscs/msantelmo/checkpoints/Apertus-8B-Instruct-2509"
+# DATASET_PATH="/iopsstor/scratch/cscs/msantelmo/SSFT/data/sft_1/sft0+teacher-baseline"
+# LEARNING_RATE="5e-5"
+# RESUME_RUN_NAME=""
 # # cap-filter-fill
 # MODEL_PATH="/iopsstor/scratch/cscs/msantelmo/checkpoints/Apertus-8B-2509"
 # TOKENIZER_PATH="/iopsstor/scratch/cscs/msantelmo/checkpoints/Apertus-8B-Instruct-2509"
 # DATASET_PATH="/iopsstor/scratch/cscs/msantelmo/SSFT/data/sft_1/cap-filter-fill-apertus-8b-2509-sft0-step11776-mix-sft0"
+# RESUME_RUN_NAME=Apertus-8B-2509__cap-filter-fill-apertus-8b-2509-sft0-step11776-mix-sft0__sp2-lr5e-5-bs512-warmuplinear-lr_warmup_steps_ratio0.03__20260716-001239
 # LEARNING_RATE="5e-5"
-# # cap-filter-fill - smaller lr
+# # cap-filter-hard
 # MODEL_PATH="/iopsstor/scratch/cscs/msantelmo/checkpoints/Apertus-8B-2509"
 # TOKENIZER_PATH="/iopsstor/scratch/cscs/msantelmo/checkpoints/Apertus-8B-Instruct-2509"
 # DATASET_PATH="/iopsstor/scratch/cscs/msantelmo/SSFT/data/sft_1/cap-filter-fill-apertus-8b-2509-sft0-step11776-mix-sft0"
+# RESUME_RUN_NAME=Apertus-8B-2509__cap-filter-fill-apertus-8b-2509-sft0-step11776-mix-sft0__sp2-lr5e-5-bs512-warmuplinear-lr_warmup_steps_ratio0.03__20260716-001239
+# LEARNING_RATE="5e-5"
+
+# ## Apertus v1.5 from scratch
+MODEL_PATH="/capstor/store/cscs/swissai/infra01/apertus_1p5/hf_checkpoints/apertus-1p5_8b_seq_len_256k_7000_steps"
+TOKENIZER_PATH="/capstor/store/cscs/swissai/infra01/models/rleval/rl_1p5-8b-stage2_notools_mixthink_1606_480it"
+# DATASET_PATH="/iopsstor/scratch/cscs/msantelmo/SSFT/data/sft_1/sft0+teacher-baseline"
+# DATASET_PATH="/iopsstor/scratch/cscs/msantelmo/SSFT/data/sft_1/cap-filter-hard-apertus-8b-2509-sft0-step11776-mix-sft0"
+DATASET_PATH="/iopsstor/scratch/cscs/msantelmo/SSFT/data/sft_1/cap-filter-fill-apertus-1p5_8b-sft0-step11264-mix-sft0"
+LEARNING_RATE="5e-5"
+RESUME_RUN_NAME=""
+
+
+# ## Apertus v1 SFT0
+# cap-filter-fill/hard
+# MODEL_PATH="/iopsstor/scratch/cscs/msantelmo/checkpoints/sft_0/Apertus-8B-2509__sft_0_lr5e-5-ratio03__global_step_11776"
+# TOKENIZER_PATH="/iopsstor/scratch/cscs/msantelmo/checkpoints/sft_0/Apertus-8B-2509__sft_0_lr5e-5-ratio03__global_step_11776"
+# DATASET_PATH="/iopsstor/scratch/cscs/msantelmo/SSFT/data/sft_1/teacher-baseline"  # baseline
+# DATASET_PATH="/iopsstor/scratch/cscs/msantelmo/SSFT/data/sft_1/cap-filter-fill-apertus-8b-2509-sft0-step11776"  # cap-filter-fill
+# DATASET_PATH="/iopsstor/scratch/cscs/msantelmo/SSFT/data/sft_1/cap-filter-hard-apertus-8b-2509-sft0-step11776"  # cap-filter-hard
+# RESUME_RUN_NAME=""
 # LEARNING_RATE="1e-5"
+
 
 CUSTOM_CLS_NAME="ApertusSFTDataset"
 MODEL_DTYPE="bfloat16"
@@ -59,13 +83,14 @@ WARMUP_STYLE="linear"
 LR_WARMUP_STEPS_RATIO=0.03
 TOTAL_EPOCHS=2
 if [[ "$DATASET_PATH" == *"sft0+"* ]] || [[ "$DATASET_PATH" == *"mix-sft0"* ]]; then
-    TEST_FREQ=512
+    TEST_FREQ=1024
     SAVE_FREQ=512
+    ROLLOUT_NODES=8
 else
-    TEST_FREQ=128
-    SAVE_FREQ=256
+    TEST_FREQ=256
+    SAVE_FREQ=128
+    ROLLOUT_NODES=16
 fi
-ROLLOUT_NODES=8
 ROLLOUT_MAX_CONCURRENT_REQUESTS=2048
 MAX_CKPT_TO_KEEP=5
 TOTAL_TRAINING_STEPS=null
@@ -94,7 +119,11 @@ WANDB_MODE="${WANDB_MODE:-online}"
 # Generate run name and experiment name from key parameters
 MODEL_NAME=${MODEL_ALIAS:-$(basename "$MODEL_PATH")}
 DATASET_NAME=$(basename "$DATASET_PATH")
-RUN_NAME="${RUN_NAME:-${MODEL_NAME}__${DATASET_NAME}__sp${SEQ_PARALLEL}-lr${LEARNING_RATE}-bs${TRAIN_BATCH_SIZE}-warmup${WARMUP_STYLE}-lr_warmup_steps_ratio${LR_WARMUP_STEPS_RATIO}__$(date '+%Y%m%d-%H%M%S')}"
+if [[ -z "$RESUME_RUN_NAME" ]]; then
+    RUN_NAME="${RUN_NAME:-${MODEL_NAME}__${DATASET_NAME}__sp${SEQ_PARALLEL}-lr${LEARNING_RATE}-bs${TRAIN_BATCH_SIZE}-warmup${WARMUP_STYLE}-lr_warmup_steps_ratio${LR_WARMUP_STEPS_RATIO}__$(date '+%Y%m%d-%H%M%S')}"
+else
+    RUN_NAME=$RESUME_RUN_NAME
+fi
 RUN_DIR="${RUN_DIR:-${OUTPUT_ROOT}/${RUN_NAME}}"
 LOG_DIR="${RUN_DIR}/logs"
 
