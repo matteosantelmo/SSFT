@@ -25,7 +25,7 @@ DATASET_PATH="/iopsstor/scratch/cscs/msantelmo/SSFT/data/sft_0"
 
 ## Apertus v1 - modified template from v1-Instruct
 MODEL_PATH="/iopsstor/scratch/cscs/msantelmo/checkpoints/Apertus-8B-2509"
-TOKENIZER_PATH="/iopsstor/scratch/cscs/msantelmo/checkpoints/Apertus-8B-Instruct-2509"
+TOKENIZER_PATH="/iopsstor/scratch/cscs/msantelmo/tokenizers/apertus_2509_text_only_aligned_v3"
 
 ## Apertus v1.5 before lc extension
 # MODEL_PATH="/capstor/store/cscs/swissai/infra01/hf-checkpoints/Apertus-1p5-8B-it430000"

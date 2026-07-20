@@ -5,6 +5,10 @@ A prompt counts as "solvable" by the student when at least one of its verified
 attempts scored above the threshold (i.e. the prompt is inside the model's support).
 Attempts that were cut off by the generation token limit (finish_reason "length")
 never count as correct, regardless of their score.
+
+One invocation can write several datasets via repeatable --build NAME:STRATEGY:MODE
+specs: the heavy inputs (teacher/student results, SFT-0) are loaded once and shared
+across builds, with outputs identical to separate single-build runs.
 """
 
 from __future__ import annotations
@@ -17,8 +21,9 @@ import random
 import re
 import time
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import numpy as np
 import pyarrow as pa
@@ -28,9 +33,23 @@ from tqdm import tqdm
 
 REASON_OPEN = ("<|inner_prefix|>", "<think>")
 REASON_CLOSE = ("<|inner_suffix|>", "</think>")
+THINKING_MARKERS = ("<|inner_prefix|>", "<|inner_suffix|>", "<|channel>thought", "<think>", "</think>")
 DEFAULT_HASHES = 64
 DEFAULT_BANDS = 16
 MINHASH_PRIME = (1 << 61) - 1
+STRATEGIES = ("solvable-student-else-teacher", "unsolvable-teacher-only", "teacher-only")
+STUDENT_STRATEGIES = ("solvable-student-else-teacher", "unsolvable-teacher-only")
+DATASET_MODES = ("standalone", "mixed")
+
+
+@dataclass(frozen=True)
+class BuildSpec:
+    """One requested output dataset: name, destination, strategy, and mode."""
+
+    name: str
+    output_dir: Path
+    strategy: str
+    dataset_mode: str
 
 
 def log(message: str) -> None:
@@ -323,8 +342,13 @@ def make_sft_row(
     data_source = record.get("data_source") or (pid.rsplit(":", 1)[0] if ":" in pid else None)
     metadata = {
         "origin": source,
+        "sample_id": str(record["id"]),
         "prompt_id": pid,
         "data_source": data_source,
+        "model": record.get("teacher_model") or record.get("model"),
+        "repeat_idx": record.get("repeat_idx"),
+        "score": record.get("score"),
+        "completion_tokens": record.get("completion_tokens"),
         "student_attempt_count": student_attempt_count,
         "student_pass_count": student_pass_count,
     }
@@ -345,6 +369,17 @@ def no_cot_enable_thinking(*, strategy: str, rng: random.Random) -> bool:
     raise ValueError(f"unsupported no-CoT enable-thinking strategy {strategy!r}")
 
 
+def is_solvable(student: dict[str, Any] | None, score_threshold: float) -> bool:
+    """True when the student's best attempt solves the prompt (complete, above threshold)."""
+    return bool(
+        student is not None
+        and student.get("score") is not None
+        and float(student["score"]) > score_threshold
+        and (student.get("response") or "").strip()
+        and not is_truncated(student)
+    )
+
+
 def build_reasoning_rows(
     *,
     strategy: str,
@@ -355,8 +390,14 @@ def build_reasoning_rows(
     score_threshold: float,
     seed: int,
     no_cot_enable_thinking_strategy: str,
+    solvable_cot_alpha: float = 0.0,
+    teacher_cot_probability: float | None = None,
 ) -> list[dict[str, Any]]:
     """Build reasoning rows according to the selected data strategy."""
+    if strategy == "unsolvable-teacher-only" and solvable_cot_alpha:
+        raise ValueError("solvable_cot_alpha is incompatible with unsolvable-teacher-only")
+    if strategy == "teacher-only" and teacher_cot_probability is None:
+        raise ValueError("teacher-only requires a resolved teacher_cot_probability")
     rng = random.Random(seed)
     rows: list[dict[str, Any]] = []
     for pid in tqdm(sorted(teacher_best), desc=f"[rows] {strategy}", unit="prompt", dynamic_ncols=True):
@@ -364,16 +405,13 @@ def build_reasoning_rows(
         student = student_best.get(pid)
         attempt_count = student_attempt_counts.get(pid)
         pass_count = student_pass_counts.get(pid, 0) if attempt_count is not None else None
-        solvable_by_student = (
-            student is not None
-            and student.get("score") is not None
-            and float(student["score"]) > score_threshold
-            and (student.get("response") or "").strip()
-            and not is_truncated(student)
-        )
+        solvable_by_student = is_solvable(student, score_threshold)
 
         if strategy == "solvable-student-else-teacher":
-            if solvable_by_student:
+            use_student = solvable_by_student and not (
+                solvable_cot_alpha and rng.random() < solvable_cot_alpha
+            )
+            if use_student:
                 rows.append(
                     make_sft_row(
                         student,
@@ -410,8 +448,8 @@ def build_reasoning_rows(
                         student_pass_count=pass_count,
                     )
                 )
-        elif strategy == "teacher-only-5050":
-            include_reasoning = rng.random() < 0.5
+        elif strategy == "teacher-only":
+            include_reasoning = rng.random() < teacher_cot_probability
             rows.append(
                 make_sft_row(
                     teacher,
@@ -528,42 +566,52 @@ def jaccard(left: frozenset[int], right: frozenset[int]) -> float:
 
 
 class PromptLSH:
-    """MinHash LSH index for finding SFT-0 prompts overlapping reasoning rows."""
+    """MinHash LSH index mapping prompts to the (prompt_id, origin) tags using them."""
 
-    def __init__(self, prompts: Iterable[str], *, num_hashes: int, bands: int):
-        """Build an LSH index over prompt strings."""
+    def __init__(self, *, num_hashes: int, bands: int):
+        """Create an empty LSH index."""
         if num_hashes % bands != 0:
             raise ValueError("--lsh-num-hashes must be divisible by --lsh-bands")
         self.num_hashes = num_hashes
         self.bands = bands
         self.rows_per_band = num_hashes // bands
-        self.prompts: dict[int, frozenset[int]] = {}
+        self.shingles: dict[int, frozenset[int]] = {}
+        self.tags: dict[int, set[tuple[str, str]]] = defaultdict(set)
         self.index: dict[tuple[int, tuple[int, ...]], list[int]] = defaultdict(list)
-        prompts = list(prompts)
-        for prompt in tqdm(prompts, desc="[dedup] building LSH index", unit="prompt", dynamic_ncols=True):
+
+    def add(self, prompt: str, tag: tuple[str, str]) -> None:
+        """Index a prompt under a (prompt_id, origin) tag."""
+        key = stable_hash(normalize_text(prompt))
+        if key not in self.shingles:
             shingles = shingle_text(prompt)
-            key = stable_hash(normalize_text(prompt))
-            self.prompts[key] = shingles
-            signature = minhash(shingles, num_hashes)
-            for band in range(bands):
+            self.shingles[key] = shingles
+            signature = minhash(shingles, self.num_hashes)
+            for band in range(self.bands):
                 start = band * self.rows_per_band
                 band_key = (band, signature[start : start + self.rows_per_band])
                 self.index[band_key].append(key)
+        self.tags[key].add(tag)
 
-    def has_near_duplicate(self, prompt: str, *, threshold: float) -> bool:
-        """Return whether a prompt matches an indexed prompt above threshold."""
-        normalized = normalize_text(prompt)
-        key = stable_hash(normalized)
+    def matching_tags(self, prompt: str, *, threshold: float) -> set[tuple[str, str]]:
+        """Return the tags of all indexed prompts matching this prompt above threshold."""
+        key = stable_hash(normalize_text(prompt))
         shingles = shingle_text(prompt)
-        if key in self.prompts:
-            return True
+        matched: set[int] = set()
+        if key in self.shingles:
+            matched.add(key)
         signature = minhash(shingles, self.num_hashes)
         candidates: set[int] = set()
         for band in range(self.bands):
             start = band * self.rows_per_band
             band_key = (band, signature[start : start + self.rows_per_band])
             candidates.update(self.index.get(band_key, ()))
-        return any(jaccard(shingles, self.prompts[candidate]) >= threshold for candidate in candidates)
+        for candidate in candidates:
+            if candidate not in matched and jaccard(shingles, self.shingles[candidate]) >= threshold:
+                matched.add(candidate)
+        tags: set[tuple[str, str]] = set()
+        for matched_key in matched:
+            tags.update(self.tags[matched_key])
+        return tags
 
 
 def normalize_sft0_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -586,8 +634,13 @@ def normalize_sft0_row(row: dict[str, Any]) -> dict[str, Any]:
     conversation_id = as_plain(row.get("conversation_id"))
     metadata = {
         "origin": "sft0",
+        "sample_id": None if conversation_id is None else str(conversation_id),
         "prompt_id": None if conversation_id is None else str(conversation_id),
         "data_source": None,
+        "model": None,
+        "repeat_idx": None,
+        "score": None,
+        "completion_tokens": None,
         "student_attempt_count": None,
         "student_pass_count": None,
     }
@@ -620,31 +673,79 @@ def load_sft0_rows(paths: list[Path]) -> list[dict[str, Any]]:
     return rows
 
 
-def dedup_sft0_rows(
-    sft0_rows: list[dict[str, Any]],
-    reasoning_rows: list[dict[str, Any]],
+def used_prompt_tags(reasoning_rows: list[dict[str, Any]]) -> set[tuple[str, str]]:
+    """Collect the (prompt_id, origin) pairs whose prompts appear in built rows."""
+    tags: set[tuple[str, str]] = set()
+    for row in reasoning_rows:
+        metadata = json.loads(row["metadata"])
+        tags.add((metadata["prompt_id"], metadata["origin"]))
+    return tags
+
+
+def build_prompt_index(
+    tags: set[tuple[str, str]],
+    teacher_best: dict[str, dict[str, Any]],
+    student_best: dict[str, dict[str, Any]],
     *,
-    threshold: float,
     num_hashes: int,
     bands: int,
+) -> PromptLSH:
+    """Index the prompt text behind every (prompt_id, origin) pair used by any build."""
+    lsh = PromptLSH(num_hashes=num_hashes, bands=bands)
+    for pid, origin in tqdm(sorted(tags), desc="[dedup] building LSH index", unit="prompt", dynamic_ncols=True):
+        record = teacher_best[pid] if origin == "teacher" else student_best[pid]
+        lsh.add(prompt_text_from_messages(convert_prompt(record["prompt"])), (pid, origin))
+    return lsh
+
+
+def match_sft0_rows(
+    sft0_rows: list[dict[str, Any]],
+    lsh: PromptLSH,
+    *,
+    threshold: float,
+) -> dict[int, set[tuple[str, str]]]:
+    """Map SFT-0 row indices to the (prompt_id, origin) tags they near-duplicate.
+
+    Runs once per invocation; each mixed build then filters rows by intersecting
+    these tags with the tags its own reasoning rows actually use, which is exactly
+    equivalent to deduplicating against that build's rows alone.
+    """
+    matches: dict[int, set[tuple[str, str]]] = {}
+    for index, row in enumerate(tqdm(sft0_rows, desc="[dedup] scanning SFT-0 rows", unit="row", dynamic_ncols=True)):
+        prompt = prompt_text_from_messages(parse_json_cell(row["messages"], field="messages"))
+        tags = lsh.matching_tags(prompt, threshold=threshold)
+        if tags:
+            matches[index] = tags
+    return matches
+
+
+def filter_sft0_rows(
+    sft0_rows: list[dict[str, Any]],
+    matches: dict[int, set[tuple[str, str]]],
+    used_tags: set[tuple[str, str]],
 ) -> tuple[list[dict[str, Any]], int]:
-    """Remove SFT-0 rows whose prompts overlap reasoning rows."""
-    reasoning_prompts = [
-        prompt_text_from_messages(parse_json_cell(row["messages"], field="messages"))
-        for row in reasoning_rows
-    ]
-    lsh = PromptLSH(reasoning_prompts, num_hashes=num_hashes, bands=bands)
+    """Keep SFT-0 rows that don't near-duplicate any prompt used by this build."""
     kept: list[dict[str, Any]] = []
     removed = 0
-    for row in tqdm(sft0_rows, desc="[dedup] scanning SFT-0 rows", unit="row", dynamic_ncols=True):
-        messages = parse_json_cell(row["messages"], field="messages")
-        prompt = prompt_text_from_messages(messages)
-        if lsh.has_near_duplicate(prompt, threshold=threshold):
+    for index, row in enumerate(sft0_rows):
+        tags = matches.get(index)
+        if tags and tags & used_tags:
             removed += 1
         else:
             kept.append(row)
-    log(f"[dedup] removed {removed:,} of {len(sft0_rows):,} SFT-0 rows overlapping reasoning prompts")
     return kept, removed
+
+
+def filter_invalid_thinking_rows(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Remove rows with thinking markers while thinking is disabled."""
+    return [
+        row
+        for row in rows
+        if row.get("enable_thinking")
+        or not any(marker in row["messages"] for marker in THINKING_MARKERS)
+    ]
 
 
 def write_train_dataset(rows: list[dict[str, Any]], output_dir: Path, *, seed: int) -> None:
@@ -691,26 +792,50 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--teacher-results", type=Path, action="append", required=True)
     parser.add_argument("--student-results", type=Path, action="append", default=[])
     parser.add_argument("--sft0", type=Path, action="append", default=[])
-    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path, help="output directory for a single build")
+    parser.add_argument(
+        "--build",
+        action="append",
+        default=[],
+        metavar="NAME:STRATEGY:MODE",
+        help=(
+            "Repeatable build spec for multi-build mode. NAME is the output directory "
+            "(joined to --output-base when given), STRATEGY one of "
+            f"{', '.join(STRATEGIES)}, MODE one of {', '.join(DATASET_MODES)}. "
+            "All builds share one load of the teacher/student/SFT-0 inputs and produce "
+            "outputs identical to separate single-build runs."
+        ),
+    )
+    parser.add_argument("--output-base", type=Path, help="base directory prepended to --build names")
+    parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="skip builds whose output dir already holds parquet files instead of failing",
+    )
     parser.add_argument(
         "--strategy",
-        choices=("solvable-student-else-teacher", "unsolvable-teacher-only", "teacher-only-5050"),
-        default="solvable-student-else-teacher",
+        choices=STRATEGIES,
+        default=None,
         help=(
+            "Single-build only (default solvable-student-else-teacher). "
             "solvable-student-else-teacher: student's own answer where the student solved the "
             "prompt, teacher CoT+answer otherwise. unsolvable-teacher-only: teacher CoT rows "
-            "only for prompts the student never solved. teacher-only-5050: all-teacher "
-            "rows, 50/50 coin flip on keeping the CoT."
+            "only for prompts the student never solved. teacher-only: all-teacher rows, CoT "
+            "kept with a probability matched to the cap-filter CoT rate (or "
+            "--teacher-cot-probability)."
         ),
     )
     parser.add_argument(
         "--dataset-mode",
-        choices=("standalone", "mixed"),
-        default="standalone",
-        help="standalone: reasoning rows only. mixed: merged with deduplicated SFT-0 rows.",
+        choices=DATASET_MODES,
+        default=None,
+        help=(
+            "Single-build only (default standalone). standalone: reasoning rows only. "
+            "mixed: merged with deduplicated SFT-0 rows."
+        ),
     )
     parser.add_argument("--max-attempts", type=int, default=4)
-    parser.add_argument("--score-threshold", type=float, default=0.5)
+    parser.add_argument("--score-threshold", type=float, default=0.8)
     parser.add_argument("--seed", type=int, default=85)
     parser.add_argument(
         "--no-cot-enable-thinking-strategy",
@@ -719,9 +844,30 @@ def parse_args() -> argparse.Namespace:
         help=(
             "How to set enable_thinking for rows without a thoughts block "
             "(the solvable/student rows under solvable-student-else-teacher, the no-CoT "
-            "coin-flip rows under teacher-only-5050): 'random' flips a 50/50 coin, "
+            "rows under teacher-only): 'random' flips a 50/50 coin, "
             "'none' never enables thinking. Rows with thoughts always force "
             "enable_thinking=true."
+        ),
+    )
+    parser.add_argument(
+        "--solvable-cot-alpha",
+        type=float,
+        default=0.0,
+        help=(
+            "Probability that a student-solvable prompt still gets the teacher CoT row: "
+            "under solvable-student-else-teacher each solvable prompt keeps the student's "
+            "own answer with probability 1-alpha; under teacher-only the auto-matched CoT "
+            "probability grows accordingly. Incompatible with unsolvable-teacher-only."
+        ),
+    )
+    parser.add_argument(
+        "--teacher-cot-probability",
+        type=float,
+        default=None,
+        help=(
+            "Explicit probability that a teacher-only row keeps its CoT. Default: matched "
+            "to the cap-filter CoT rate, (unsolvable + alpha*solvable) / prompts, which "
+            "requires --student-results."
         ),
     )
     parser.add_argument("--dedup-threshold", type=float, default=0.85)
@@ -732,16 +878,98 @@ def parse_args() -> argparse.Namespace:
         parser.error("--max-attempts must be positive")
     if not 0 <= args.score_threshold <= 1:
         parser.error("--score-threshold must be between 0 and 1")
-    if args.dataset_mode == "mixed" and not args.sft0:
-        parser.error("--sft0 is required when --dataset-mode=mixed")
-    if args.strategy in {"solvable-student-else-teacher", "unsolvable-teacher-only"} and not args.student_results:
-        parser.error(f"--student-results is required for --strategy={args.strategy}")
+    if not 0 <= args.solvable_cot_alpha <= 1:
+        parser.error("--solvable-cot-alpha must be between 0 and 1")
+    if args.teacher_cot_probability is not None and not 0 <= args.teacher_cot_probability <= 1:
+        parser.error("--teacher-cot-probability must be between 0 and 1")
+    if args.build and args.output_dir:
+        parser.error("--build and --output-dir are mutually exclusive")
+    if not args.build and not args.output_dir:
+        parser.error("either --output-dir or at least one --build is required")
+    if args.build and (args.strategy or args.dataset_mode):
+        parser.error("--strategy/--dataset-mode apply to single builds; encode them in each --build spec")
+    if args.output_base and not args.build:
+        parser.error("--output-base requires --build")
+
+    if args.build:
+        builds = []
+        for spec in args.build:
+            parts = spec.rsplit(":", 2)
+            if len(parts) != 3 or not all(parts):
+                parser.error(f"invalid --build spec {spec!r}; expected NAME:STRATEGY:MODE")
+            name, strategy, mode = parts
+            if strategy not in STRATEGIES:
+                parser.error(f"--build {spec!r}: unknown strategy {strategy!r}")
+            if mode not in DATASET_MODES:
+                parser.error(f"--build {spec!r}: unknown dataset mode {mode!r}")
+            output_dir = args.output_base / name if args.output_base else Path(name)
+            builds.append(BuildSpec(name=name, output_dir=output_dir, strategy=strategy, dataset_mode=mode))
+    else:
+        builds = [
+            BuildSpec(
+                name=args.output_dir.name,
+                output_dir=args.output_dir,
+                strategy=args.strategy or "solvable-student-else-teacher",
+                dataset_mode=args.dataset_mode or "standalone",
+            )
+        ]
+    output_dirs = [build.output_dir for build in builds]
+    if len(set(output_dirs)) != len(output_dirs):
+        parser.error("--build specs must not share an output directory")
+    if any(build.dataset_mode == "mixed" for build in builds) and not args.sft0:
+        parser.error("--sft0 is required when any build uses dataset mode 'mixed'")
+    student_builds = [build for build in builds if build.strategy in STUDENT_STRATEGIES]
+    if student_builds and not args.student_results:
+        parser.error(f"--student-results is required for --strategy={student_builds[0].strategy}")
+    if args.solvable_cot_alpha and any(build.strategy == "unsolvable-teacher-only" for build in builds):
+        parser.error("--solvable-cot-alpha is incompatible with unsolvable-teacher-only builds")
+    teacher_only_builds = [build for build in builds if build.strategy == "teacher-only"]
+    if teacher_only_builds and args.teacher_cot_probability is None and not args.student_results:
+        parser.error(
+            "teacher-only builds need --student-results (to match the cap-filter CoT rate) "
+            "or an explicit --teacher-cot-probability"
+        )
+    args.builds = builds
     return args
 
 
+def thought_block_count(reasoning_rows: list[dict[str, Any]]) -> int:
+    """Count reasoning rows whose assistant message carries a thoughts block."""
+    return sum(
+        any(
+            block.get("type") == "thoughts"
+            for block in (
+                parse_json_cell(row["messages"], field="messages")[-1]
+                .get("content", {})
+                .get("blocks", [])
+            )
+        )
+        for row in reasoning_rows
+    )
+
+
 def main() -> None:
-    """Build the requested train dataset and manifest."""
+    """Build the requested train datasets and manifests."""
     args = parse_args()
+    builds: list[BuildSpec] = args.builds
+
+    conflicts = [
+        build
+        for build in builds
+        if build.output_dir.exists() and any(build.output_dir.glob("*.parquet"))
+    ]
+    if conflicts and not args.skip_existing:
+        raise FileExistsError(
+            "refusing to overwrite parquet files in: "
+            + ", ".join(str(build.output_dir) for build in conflicts)
+        )
+    for build in conflicts:
+        log(f"[skip] {build.name}: parquet files already in {build.output_dir}")
+    builds = [build for build in builds if build not in conflicts]
+    if not builds:
+        log("all requested builds already exist; nothing to do")
+        return
+
     teacher_best, teacher_attempt_counts, _teacher_pass_counts = load_best_generations(
         args.teacher_results,
         max_attempts=args.max_attempts,
@@ -759,63 +987,101 @@ def main() -> None:
         else ({}, {}, {})
     )
 
-    reasoning_rows = build_reasoning_rows(
-        strategy=args.strategy,
-        teacher_best=teacher_best,
-        student_best=student_best,
-        student_attempt_counts=student_attempt_counts,
-        student_pass_counts=student_pass_counts,
-        score_threshold=args.score_threshold,
-        seed=args.seed,
-        no_cot_enable_thinking_strategy=args.no_cot_enable_thinking_strategy,
-    )
-    all_rows = reasoning_rows
-    dedup_removed = 0
-    sft0_count = 0
-    if args.dataset_mode == "mixed":
+    teacher_cot_probability = args.teacher_cot_probability
+    if any(build.strategy == "teacher-only" for build in builds) and teacher_cot_probability is None:
+        total = len(teacher_best)
+        solvable_count = sum(
+            1 for pid in teacher_best if is_solvable(student_best.get(pid), args.score_threshold)
+        )
+        unsolvable_count = total - solvable_count
+        teacher_cot_probability = (
+            (unsolvable_count + args.solvable_cot_alpha * solvable_count) / total if total else 0.0
+        )
+        log(
+            f"[teacher-only] CoT probability {teacher_cot_probability:.4f} matched to the "
+            f"cap-filter CoT rate ({unsolvable_count:,} unsolvable of {total:,} prompts"
+            + (f", alpha={args.solvable_cot_alpha}" if args.solvable_cot_alpha else "")
+            + ")"
+        )
+
+    rows_by_strategy: dict[str, list[dict[str, Any]]] = {}
+    for build in builds:
+        if build.strategy not in rows_by_strategy:
+            rows_by_strategy[build.strategy] = build_reasoning_rows(
+                strategy=build.strategy,
+                teacher_best=teacher_best,
+                student_best=student_best,
+                student_attempt_counts=student_attempt_counts,
+                student_pass_counts=student_pass_counts,
+                score_threshold=args.score_threshold,
+                seed=args.seed,
+                no_cot_enable_thinking_strategy=args.no_cot_enable_thinking_strategy,
+                solvable_cot_alpha=args.solvable_cot_alpha,
+                teacher_cot_probability=teacher_cot_probability,
+            )
+
+    mixed_builds = [build for build in builds if build.dataset_mode == "mixed"]
+    sft0_rows: list[dict[str, Any]] = []
+    matches: dict[int, set[tuple[str, str]]] = {}
+    used_tags_by_name: dict[str, set[tuple[str, str]]] = {}
+    if mixed_builds:
         sft0_rows = load_sft0_rows(args.sft0)
-        sft0_count = len(sft0_rows)
-        kept_sft0, dedup_removed = dedup_sft0_rows(
-            sft0_rows,
-            reasoning_rows,
-            threshold=args.dedup_threshold,
+        used_tags_by_name = {
+            build.name: used_prompt_tags(rows_by_strategy[build.strategy]) for build in mixed_builds
+        }
+        all_tags = set().union(*used_tags_by_name.values())
+        lsh = build_prompt_index(
+            all_tags,
+            teacher_best,
+            student_best,
             num_hashes=args.lsh_num_hashes,
             bands=args.lsh_bands,
         )
-        all_rows = kept_sft0 + reasoning_rows
+        matches = match_sft0_rows(sft0_rows, lsh, threshold=args.dedup_threshold)
 
-    log("computing dataset statistics")
-    thought_block_count = sum(
-        any(
-            block.get("type") == "thoughts"
-            for block in (
-                parse_json_cell(row["messages"], field="messages")[-1]
-                .get("content", {})
-                .get("blocks", [])
+    thought_counts: dict[str, int] = {}
+    for build in builds:
+        log(f"[build] {build.name}: strategy={build.strategy}, mode={build.dataset_mode}")
+        reasoning_rows = rows_by_strategy[build.strategy]
+        all_rows = reasoning_rows
+        dedup_removed = 0
+        sft0_count = 0
+        if build.dataset_mode == "mixed":
+            sft0_count = len(sft0_rows)
+            kept_sft0, dedup_removed = filter_sft0_rows(sft0_rows, matches, used_tags_by_name[build.name])
+            log(
+                f"[dedup] {build.name}: removed {dedup_removed:,} of {sft0_count:,} "
+                "SFT-0 rows overlapping reasoning prompts"
             )
-        )
-        for row in reasoning_rows
-    )
-    stats = {
-        "dataset_mode": args.dataset_mode,
-        "strategy": args.strategy,
-        "score_threshold": args.score_threshold,
-        "no_cot_enable_thinking_strategy": args.no_cot_enable_thinking_strategy,
-        "teacher_prompts_with_positive_score": len(teacher_best),
-        "student_prompt_count": len(student_attempt_counts),
-        "reasoning_rows": len(reasoning_rows),
-        "reasoning_rows_with_thought_blocks": thought_block_count,
-        "reasoning_rows_with_thinking_enabled": sum(bool(row.get("enable_thinking")) for row in reasoning_rows),
-        "sft0_rows_loaded": sft0_count,
-        "sft0_rows_removed_by_prompt_dedup": dedup_removed,
-        "final_rows": len(all_rows),
-        "teacher_attempt_count_max": max(teacher_attempt_counts.values(), default=0),
-        "student_attempt_count_max": max(student_attempt_counts.values(), default=0),
-    }
+            all_rows = kept_sft0 + reasoning_rows
 
-    write_train_dataset(all_rows, args.output_dir, seed=args.seed)
-    write_manifest(args.output_dir, stats)
-    print(json.dumps(stats, indent=2, sort_keys=True))
+        all_rows = filter_invalid_thinking_rows(all_rows)
+
+        if build.strategy not in thought_counts:
+            thought_counts[build.strategy] = thought_block_count(reasoning_rows)
+        stats = {
+            "dataset_mode": build.dataset_mode,
+            "strategy": build.strategy,
+            "score_threshold": args.score_threshold,
+            "no_cot_enable_thinking_strategy": args.no_cot_enable_thinking_strategy,
+            "solvable_cot_alpha": args.solvable_cot_alpha,
+            "teacher_prompts_with_positive_score": len(teacher_best),
+            "student_prompt_count": len(student_attempt_counts),
+            "reasoning_rows": len(reasoning_rows),
+            "reasoning_rows_with_thought_blocks": thought_counts[build.strategy],
+            "reasoning_rows_with_thinking_enabled": sum(bool(row.get("enable_thinking")) for row in reasoning_rows),
+            "sft0_rows_loaded": sft0_count,
+            "sft0_rows_removed_by_prompt_dedup": dedup_removed,
+            "final_rows": len(all_rows),
+            "teacher_attempt_count_max": max(teacher_attempt_counts.values(), default=0),
+            "student_attempt_count_max": max(student_attempt_counts.values(), default=0),
+        }
+        if build.strategy == "teacher-only":
+            stats["teacher_cot_probability"] = teacher_cot_probability
+
+        write_train_dataset(all_rows, build.output_dir, seed=args.seed)
+        write_manifest(build.output_dir, stats)
+        print(json.dumps(stats, indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":

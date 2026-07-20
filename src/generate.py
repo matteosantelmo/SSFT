@@ -240,10 +240,12 @@ async def process_item(
             )
 
         choice = resp.choices[0]
-        # Server-side reasoning parsers (--reasoning-parser deepseek_v4 /
-        # minimax_m2_append_think) already separate reasoning from the answer;
-        # otherwise fall back to splitting the raw content on the markers.
-        reasoning = getattr(choice.message, "reasoning_content", None)
+        # Server-side reasoning parsers already separate reasoning from the
+        # answer. vLLM's older parsers use `reasoning_content`; Gemma 4 uses
+        # the OpenAI-compatible `reasoning` field.
+        reasoning = getattr(choice.message, "reasoning_content", None) or getattr(
+            choice.message, "reasoning", None
+        )
         if reasoning:
             answer = choice.message.content or ""
         else:

@@ -21,13 +21,20 @@ WORK_DIR="${REPO_DIR}/verl_sft"
 # Paths
 OUTPUT_ROOT="${OUTPUT_ROOT:-${REPO_DIR}/outputs/sft_1}"
 
-## Apertus v1 from scratch
-# # baseline
+# ## Apertus v1 from scratch: train on SFT0+teacher, SFT0+cap-filter-fill, SFT0+cap-filter-hard
 # MODEL_PATH="/iopsstor/scratch/cscs/msantelmo/checkpoints/Apertus-8B-2509"
-# TOKENIZER_PATH="/iopsstor/scratch/cscs/msantelmo/checkpoints/Apertus-8B-Instruct-2509"
-# DATASET_PATH="/iopsstor/scratch/cscs/msantelmo/SSFT/data/sft_1/sft0+teacher-baseline"
-# LEARNING_RATE="5e-5"
-# RESUME_RUN_NAME=""
+# TOKENIZER_PATH="/iopsstor/scratch/cscs/msantelmo/tokenizers/apertus_2509_text_only_aligned_v3"
+# LEARNING_RATES=("5e-5" "1e-5" "5e-6")
+# DATASET_NAMES=("sft0+teacher-baseline" "cap-filter-fill-apertus-8b-2509-sft0-step11776-mix-sft0" "cap-filter-hard-apertus-8b-2509-sft0-step11776-mix-sft0")
+
+## Apertus v1.5 from scratch
+MODEL_PATH=${MODEL_PATH:-"/capstor/store/cscs/swissai/infra01/apertus_1p5/hf_checkpoints/apertus-1p5_8b_seq_len_256k_7000_steps"}
+TOKENIZER_PATH=${TOKENIZER_PATH:-"/iopsstor/scratch/cscs/msantelmo/tokenizers/apertus_emu3.5_wavtok_instruct_thinking_token_fixed"}
+LEARNING_RATE=${LEARNING_RATE:-"5e-5"}
+DATASET_PATH=${DATASET_PATH:-"/iopsstor/scratch/cscs/msantelmo/SSFT/data/sft_1_merged/sft0+teacher-baseline-apertus-1p5_8b-sft0-step11264"}
+
+
+############ OLD STUFF ###############
 # # cap-filter-fill
 # MODEL_PATH="/iopsstor/scratch/cscs/msantelmo/checkpoints/Apertus-8B-2509"
 # TOKENIZER_PATH="/iopsstor/scratch/cscs/msantelmo/checkpoints/Apertus-8B-Instruct-2509"
@@ -42,14 +49,13 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-${REPO_DIR}/outputs/sft_1}"
 # LEARNING_RATE="5e-5"
 
 # ## Apertus v1.5 from scratch
-MODEL_PATH="/capstor/store/cscs/swissai/infra01/apertus_1p5/hf_checkpoints/apertus-1p5_8b_seq_len_256k_7000_steps"
-TOKENIZER_PATH="/capstor/store/cscs/swissai/infra01/models/rleval/rl_1p5-8b-stage2_notools_mixthink_1606_480it"
+# MODEL_PATH="/capstor/store/cscs/swissai/infra01/apertus_1p5/hf_checkpoints/apertus-1p5_8b_seq_len_256k_7000_steps"
+# TOKENIZER_PATH="/capstor/store/cscs/swissai/infra01/models/rleval/rl_1p5-8b-stage2_notools_mixthink_1606_480it"
 # DATASET_PATH="/iopsstor/scratch/cscs/msantelmo/SSFT/data/sft_1/sft0+teacher-baseline"
 # DATASET_PATH="/iopsstor/scratch/cscs/msantelmo/SSFT/data/sft_1/cap-filter-hard-apertus-8b-2509-sft0-step11776-mix-sft0"
-DATASET_PATH="/iopsstor/scratch/cscs/msantelmo/SSFT/data/sft_1/cap-filter-fill-apertus-1p5_8b-sft0-step11264-mix-sft0"
-LEARNING_RATE="5e-5"
-RESUME_RUN_NAME=""
-
+# DATASET_PATH="/iopsstor/scratch/cscs/msantelmo/SSFT/data/sft_1/cap-filter-fill-apertus-1p5_8b-sft0-step11264-mix-sft0"
+# LEARNING_RATE="5e-5"
+# RESUME_RUN_NAME=""
 
 # ## Apertus v1 SFT0
 # cap-filter-fill/hard
@@ -60,12 +66,15 @@ RESUME_RUN_NAME=""
 # DATASET_PATH="/iopsstor/scratch/cscs/msantelmo/SSFT/data/sft_1/cap-filter-hard-apertus-8b-2509-sft0-step11776"  # cap-filter-hard
 # RESUME_RUN_NAME=""
 # LEARNING_RATE="1e-5"
+############ OLD STUFF ###############
 
 
+RESUME_RUN_NAME=""
 CUSTOM_CLS_NAME="ApertusSFTDataset"
 MODEL_DTYPE="bfloat16"
 
 # Data configuration
+USE_TRAIN_TIME_EVALS="${USE_TRAIN_TIME_EVALS:-true}"
 MAX_LENGTH=32_768
 TRAIN_BATCH_SIZE=512
 VAL_BATCH_SIZE=512
@@ -84,13 +93,28 @@ LR_WARMUP_STEPS_RATIO=0.03
 TOTAL_EPOCHS=2
 if [[ "$DATASET_PATH" == *"sft0+"* ]] || [[ "$DATASET_PATH" == *"mix-sft0"* ]]; then
     TEST_FREQ=1024
-    SAVE_FREQ=512
+    SAVE_FREQ=1024
     ROLLOUT_NODES=8
 else
     TEST_FREQ=256
     SAVE_FREQ=128
     ROLLOUT_NODES=16
 fi
+
+case "$USE_TRAIN_TIME_EVALS" in
+    true)
+        ;;
+    false)
+        TEST_FREQ=0
+        ROLLOUT_NODES=0
+        ROLLOUT_PATH=null
+        ;;
+    *)
+        echo "USE_TRAIN_TIME_EVALS must be 'true' or 'false', got: $USE_TRAIN_TIME_EVALS" >&2
+        exit 1
+        ;;
+esac
+
 ROLLOUT_MAX_CONCURRENT_REQUESTS=2048
 MAX_CKPT_TO_KEEP=5
 TOTAL_TRAINING_STEPS=null
@@ -138,7 +162,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     sbatch \
         --output="$LOG_DIR/slurm_%j.out" \
         --error="$LOG_DIR/slurm_%j.err" \
-        --export=ALL,PROJECT_NAME="$PROJECT_NAME",RUN_NAME="$RUN_NAME",RUN_DIR="$RUN_DIR",OUTPUT_ROOT="$OUTPUT_ROOT" \
+        --export=ALL,PROJECT_NAME="$PROJECT_NAME",RUN_NAME="$RUN_NAME",RUN_DIR="$RUN_DIR",OUTPUT_ROOT="$OUTPUT_ROOT",USE_TRAIN_TIME_EVALS="$USE_TRAIN_TIME_EVALS" \
         "$0"
     echo "Run directory: $RUN_DIR"
     exit 0
@@ -165,12 +189,17 @@ pip wheel . --no-cache-dir --no-deps -w $WHEEL_DIR"
 PACKAGE_WHEEL=$(ls -t "$WHEEL_DIR"/*.whl | head -n1)
 
 TRAINING_NODES=$((SLURM_NNODES - ROLLOUT_NODES))
-rollout_nodes=("${nodes[@]:$TRAINING_NODES:$ROLLOUT_NODES}")
+rollout_nodes=()
 rollout_node_ips=()
+ROLLOUT_URL=null
+
+if (( ROLLOUT_NODES > 0 )); then
+    rollout_nodes=("${nodes[@]:$TRAINING_NODES:$ROLLOUT_NODES}")
 for node in "${rollout_nodes[@]}"; do
     rollout_node_ips+=("$(srun --nodes=1 --ntasks=1 --nodelist=$node hostname -i)")
 done
 ROLLOUT_URL="http://${rollout_node_ips[0]}:30000"
+fi
 
 if [ "$SEQ_PARALLEL" -gt 1 ]; then
     SEQ_PARALLEL_FLAG="engine.ulysses_sequence_parallel_size=$SEQ_PARALLEL"
@@ -270,6 +299,7 @@ torchrun --nnodes=$TRAINING_NODES --nproc_per_node=4 --node_rank=$local_rank --m
     hydra.run.dir=$save_path/hydra $SEQ_PARALLEL_FLAG" &
 done
 
+if (( ROLLOUT_NODES > 0 )); then
 WORKER_URLS=""
 for node_idx in $(seq 0 $((ROLLOUT_NODES - 1))); do
     node=${rollout_nodes[$node_idx]}
@@ -300,6 +330,7 @@ export no_proxy=\"0.0.0.0,$no_proxy\"
 export NO_PROXY=\"0.0.0.0,$NO_PROXY\"
 
 python -m sglang_router.launch_router --host=0.0.0.0 --port=30000 --worker-urls $WORKER_URLS --model-path=$ROLLOUT_MODEL_PATH" &
+fi
 
 wait -n
 scancel $SLURM_JOB_ID

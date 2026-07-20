@@ -37,12 +37,13 @@ INPUT_PARQUET=/iopsstor/scratch/cscs/msantelmo/SSFT/data/cap_filter/${DOMAIN}/tr
 PROJECT_NAME="capability-filtering"
 
 # MODEL_PATH=/capstor/scratch/cscs/msantelmo/huggingface/hub/models--Qwen--Qwen3.6-27B/snapshots/6a9e13bd6fc8f0983b9b99948120bc37f49c13e9
-MODEL_PATH=/capstor/store/cscs/swissai/infra01/hf_models/models/MiniMaxAI/MiniMax-M2.7
-OUTPUT_DIR="/users/msantelmo/scratch/SSFT/outputs/teacher_MiniMax-M2.7/${DOMAIN}"
+# MODEL_PATH=/capstor/store/cscs/swissai/infra01/hf_models/models/MiniMaxAI/MiniMax-M2.7
+MODEL_PATH=/capstor/store/cscs/swissai/infra01/hf_models/models/google/gemma-4-31B-it
+OUTPUT_DIR="/users/msantelmo/scratch/SSFT/outputs/teacher_gemma-4-31B/${DOMAIN}"
 TOKENIZER_PATH=""
 CHAT_TEMPLATE=""
 THINKING=on
-FRAMEWORK=sglang  # sglang
+FRAMEWORK=vllm  # sglang
 
 if [[ "$THINKING" == "on" ]]; then
   # Must be false to parse reasoning <|inner_prefix|>/<|inner_suffix|>
@@ -57,12 +58,12 @@ STOP_ON_FIRST_CORRECT=on
 CORRECT_THRESHOLD="${CORRECT_THRESHOLD:-0.7}"
 TIME_LIMIT="${TIME_LIMIT:-12:00:00}"
 REPEATS=8
-REPLICAS=32
+REPLICAS=24
 NODES_PER_REPLICA=1
-TP_SIZE=""
-DP_SIZE=""
+TP_SIZE=4
+DP_SIZE=1
 MAX_MODEL_LEN=32768
-GPU_MEM_UTIL=0.8
+GPU_MEM_UTIL=0.7
 
 # ---- model-family presets ----------------------------------------------------
 # DeepSeek-V4-Flash (284B-A13B, FP4 experts + FP8, ~149GB) and MiniMax-M2.7
@@ -113,6 +114,13 @@ case "$(basename "$MODEL_PATH")" in
     [[ "$THINKING" != "on" ]] && echo "[warn] MiniMax-M2 always thinks; THINKING=$THINKING has no effect." >&2
     PRE_LAUNCH_CMDS=""
     ;;
+  [Gg]emma-4-*)
+    # Gemma 4 emits reasoning as <|channel>thought ... <channel|>. Let
+    # vLLM split it into reasoning_content and final content instead of
+    # treating its structural tokens as part of the answer.
+    EXTRA_FRAMEWORK_ARGS="${EXTRA_FRAMEWORK_ARGS:+$EXTRA_FRAMEWORK_ARGS }--reasoning-parser gemma4"
+    SKIP_SPECIAL_TOKENS=true
+    ;;
 esac
 
 if [[ "$FRAMEWORK" == "sglang" ]]; then
@@ -130,11 +138,12 @@ else
 fi
 PARTITION="normal"
 RESERVATION="SD-69241-apertus-1-5-0"
+EXCLUDE_NODES="${EXCLUDE_NODES:-nid007277,nid006065,nid006076,nid006080,nid006081,nid006082,nid006085,nid006086}"
 
 # Runs inside each replica's container (writable overlay) before vllm starts.
 # The image's transformers is too old for gemma-4 (`model type gemma4` not
 # recognized) — upgrade it at startup. 
-PRE_LAUNCH_CMDS="${PRE_LAUNCH_CMDS-python3 -m pip install --no-cache-dir --upgrade transformers}"
+PRE_LAUNCH_CMDS="${PRE_LAUNCH_CMDS-python3 -m pip install --no-cache-dir --upgrade 'transformers==5.13.1'}"
 
 # client-side knobs (forwarded to src/generate.py)
 # Code verifiers (taco/apps/codeforces/...) run in the Kubernetes sandbox when
@@ -171,6 +180,8 @@ mkdir -p "$OUTPUT_DIR/logs"
 
 reservation_args=()
 [[ -n "$RESERVATION" ]] && reservation_args=(--reservation "$RESERVATION")
+exclude_nodes_args=()
+[[ -n "$EXCLUDE_NODES" ]] && exclude_nodes_args=(--exclude-nodes "$EXCLUDE_NODES")
 
 if [[ "$FRAMEWORK" == "sglang" ]]; then
   FRAMEWORK_ARGS="--model-path $MODEL_PATH \
@@ -215,7 +226,7 @@ echo "   early stop : $STOP_ON_FIRST_CORRECT (correct threshold=$CORRECT_THRESHO
 echo "   sandbox    : ${KUBERNETES_SANDBOX_URL:-<none — local prime_code>}"
 echo "   chat tmpl  : ${CHAT_TEMPLATE:-<model-dir default>}"
 echo "   tokenizer  : ${TOKENIZER_PATH:-<model-dir default>}"
-echo "   partition  : $PARTITION  reservation: ${RESERVATION:-<none>}  time: $TIME_LIMIT"
+echo "   partition  : $PARTITION  reservation: ${RESERVATION:-<none>}  exclude: ${EXCLUDE_NODES:-<none>}  time: $TIME_LIMIT"
 echo "============================================================"
 
 router_args_opt=()
@@ -227,6 +238,7 @@ pre_launch_opt=()
 submit_out="$(sml advanced \
   --partition "$PARTITION" \
   "${reservation_args[@]}" \
+  "${exclude_nodes_args[@]}" \
   --replicas "$REPLICAS" \
   --nodes-per-replica "$NODES_PER_REPLICA" \
   --framework "$FRAMEWORK" \
