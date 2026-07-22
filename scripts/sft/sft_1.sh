@@ -3,7 +3,7 @@
 #SBATCH --account=infra01
 #SBATCH --time=12:00:00
 #SBATCH --exclusive
-#SBATCH --nodes=24
+#SBATCH --nodes=16
 #SBATCH --gpus-per-node=4
 #SBATCH --ntasks-per-node=5
 #SBATCH --mem=460800
@@ -27,9 +27,27 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-${REPO_DIR}/outputs/sft_1}"
 # LEARNING_RATES=("5e-5" "1e-5" "5e-6")
 # DATASET_NAMES=("sft0+teacher-baseline" "cap-filter-fill-apertus-8b-2509-sft0-step11776-mix-sft0" "cap-filter-hard-apertus-8b-2509-sft0-step11776-mix-sft0")
 
-## Apertus v1.5 from scratch
-MODEL_PATH=${MODEL_PATH:-"/capstor/store/cscs/swissai/infra01/apertus_1p5/hf_checkpoints/apertus-1p5_8b_seq_len_256k_7000_steps"}
-TOKENIZER_PATH=${TOKENIZER_PATH:-"/iopsstor/scratch/cscs/msantelmo/tokenizers/apertus_emu3.5_wavtok_instruct_thinking_token_fixed"}
+# Model configuration. Qwen SFT1 deliberately starts from the same base model
+# as Qwen SFT0, but uses the separately-built thinking tokenizer.
+MODEL_FAMILY="${MODEL_FAMILY:-apertus_1p5}"
+case "$MODEL_FAMILY" in
+    apertus_1p5)
+        MODEL_PATH="${MODEL_PATH:-/capstor/store/cscs/swissai/infra01/apertus_1p5/hf_checkpoints/apertus-1p5_8b_seq_len_256k_7000_steps}"
+        TOKENIZER_PATH="${TOKENIZER_PATH:-/iopsstor/scratch/cscs/msantelmo/tokenizers/apertus_emu3.5_wavtok_instruct_thinking_token_fixed}"
+        CUSTOM_CLS_NAME="${CUSTOM_CLS_NAME:-ApertusSFTDataset}"
+        INVALID_ROW_POLICY="${INVALID_ROW_POLICY:-error}"
+        ;;
+    qwen2_5)
+        MODEL_PATH="${MODEL_PATH:-/iopsstor/scratch/cscs/msantelmo/checkpoints/Qwen2.5-7B}"
+        TOKENIZER_PATH="${TOKENIZER_PATH:-/iopsstor/scratch/cscs/msantelmo/tokenizers/qwen2.5-7b-instruct-thinking}"
+        CUSTOM_CLS_NAME="${CUSTOM_CLS_NAME:-Qwen2_5SFTDataset}"
+        INVALID_ROW_POLICY="${INVALID_ROW_POLICY:-filter}"
+        ;;
+    *)
+        echo "Unsupported MODEL_FAMILY: $MODEL_FAMILY" >&2
+        exit 1
+        ;;
+esac
 LEARNING_RATE=${LEARNING_RATE:-"5e-5"}
 DATASET_PATH=${DATASET_PATH:-"/iopsstor/scratch/cscs/msantelmo/SSFT/data/sft_1_merged/sft0+teacher-baseline-apertus-1p5_8b-sft0-step11264"}
 
@@ -70,11 +88,10 @@ DATASET_PATH=${DATASET_PATH:-"/iopsstor/scratch/cscs/msantelmo/SSFT/data/sft_1_m
 
 
 RESUME_RUN_NAME=""
-CUSTOM_CLS_NAME="ApertusSFTDataset"
 MODEL_DTYPE="bfloat16"
 
 # Data configuration
-USE_TRAIN_TIME_EVALS="${USE_TRAIN_TIME_EVALS:-true}"
+USE_TRAIN_TIME_EVALS="${USE_TRAIN_TIME_EVALS:-false}"
 MAX_LENGTH=32_768
 TRAIN_BATCH_SIZE=512
 VAL_BATCH_SIZE=512
@@ -105,7 +122,6 @@ case "$USE_TRAIN_TIME_EVALS" in
     true)
         ;;
     false)
-        TEST_FREQ=0
         ROLLOUT_NODES=0
         ROLLOUT_PATH=null
         ;;
@@ -131,7 +147,7 @@ ENABLE_THINKING_KEY="enable_thinking"
 CUSTOM_CLS_PATH="verl/utils/dataset/multiturn_sft_dataset.py"
 
 # Rollout evaluation
-ROLLOUT_MODEL_PATH="$MODEL_PATH"
+ROLLOUT_MODEL_PATH="${ROLLOUT_MODEL_PATH:-$MODEL_PATH}"
 ROLLOUT_TEMPERATURE=0.7
 ROLLOUT_TOP_P=0.95
 ROLLOUT_NUM_SAMPLES=64
@@ -144,7 +160,7 @@ WANDB_MODE="${WANDB_MODE:-online}"
 MODEL_NAME=${MODEL_ALIAS:-$(basename "$MODEL_PATH")}
 DATASET_NAME=$(basename "$DATASET_PATH")
 if [[ -z "$RESUME_RUN_NAME" ]]; then
-    RUN_NAME="${RUN_NAME:-${MODEL_NAME}__${DATASET_NAME}__sp${SEQ_PARALLEL}-lr${LEARNING_RATE}-bs${TRAIN_BATCH_SIZE}-warmup${WARMUP_STYLE}-lr_warmup_steps_ratio${LR_WARMUP_STEPS_RATIO}__$(date '+%Y%m%d-%H%M%S')}"
+    RUN_NAME="${RUN_NAME:-${MODEL_FAMILY}__sft1__${MODEL_NAME}__${DATASET_NAME}__sp${SEQ_PARALLEL}-lr${LEARNING_RATE}-bs${TRAIN_BATCH_SIZE}-warmup${WARMUP_STYLE}-lr_warmup_steps_ratio${LR_WARMUP_STEPS_RATIO}__$(date '+%Y%m%d-%H%M%S')}"
 else
     RUN_NAME=$RESUME_RUN_NAME
 fi
@@ -154,6 +170,13 @@ LOG_DIR="${RUN_DIR}/logs"
 # Environment
 VERL_ENVIRONMENT="/capstor/store/cscs/swissai/infra01/reasoning/imgs/projects/verl_swiss:1/env.toml"
 SGLANG_ROUTER_ENVIRONMENT="/capstor/store/cscs/swissai/infra01/reasoning/users/nathanrchn/images/sglang_router/env.toml"
+
+# Resolve and print model-family configuration without submitting a job.
+if [[ "${SFT_CONFIG_ONLY:-false}" == "true" ]]; then
+    printf 'MODEL_FAMILY=%s\nMODEL_PATH=%s\nTOKENIZER_PATH=%s\nCUSTOM_CLS_NAME=%s\nINVALID_ROW_POLICY=%s\nRUN_NAME=%s\n' \
+        "$MODEL_FAMILY" "$MODEL_PATH" "$TOKENIZER_PATH" "$CUSTOM_CLS_NAME" "$INVALID_ROW_POLICY" "$RUN_NAME"
+    exit 0
+fi
 
 # The run directory must exist before Slurm resolves its stdout/stderr paths.
 # Launch this file as a shell script; it submits itself after resolving the run.
@@ -195,10 +218,10 @@ ROLLOUT_URL=null
 
 if (( ROLLOUT_NODES > 0 )); then
     rollout_nodes=("${nodes[@]:$TRAINING_NODES:$ROLLOUT_NODES}")
-for node in "${rollout_nodes[@]}"; do
-    rollout_node_ips+=("$(srun --nodes=1 --ntasks=1 --nodelist=$node hostname -i)")
-done
-ROLLOUT_URL="http://${rollout_node_ips[0]}:30000"
+    for node in "${rollout_nodes[@]}"; do
+        rollout_node_ips+=("$(srun --nodes=1 --ntasks=1 --nodelist=$node hostname -i)")
+    done
+    ROLLOUT_URL="http://${rollout_node_ips[0]}:30000"
 fi
 
 if [ "$SEQ_PARALLEL" -gt 1 ]; then
@@ -262,6 +285,7 @@ torchrun --nnodes=$TRAINING_NODES --nproc_per_node=4 --node_rank=$local_rank --m
     data.enable_thinking_key=$ENABLE_THINKING_KEY \
     data.custom_cls.path=$CUSTOM_CLS_PATH \
     data.custom_cls.name=$CUSTOM_CLS_NAME \
+    +data.invalid_row_policy=$INVALID_ROW_POLICY \
     data.max_length=$MAX_LENGTH \
     data.train_batch_size=$TRAIN_BATCH_SIZE \
     data.val_batch_size=$VAL_BATCH_SIZE \
@@ -300,16 +324,16 @@ torchrun --nnodes=$TRAINING_NODES --nproc_per_node=4 --node_rank=$local_rank --m
 done
 
 if (( ROLLOUT_NODES > 0 )); then
-WORKER_URLS=""
-for node_idx in $(seq 0 $((ROLLOUT_NODES - 1))); do
-    node=${rollout_nodes[$node_idx]}
-    node_ip=${rollout_node_ips[$node_idx]}
+    WORKER_URLS=""
+    for node_idx in $(seq 0 $((ROLLOUT_NODES - 1))); do
+        node=${rollout_nodes[$node_idx]}
+        node_ip=${rollout_node_ips[$node_idx]}
 
-    for i in $(seq 0 3); do
-        port=$((50000 + i))
-        WORKER_URLS="${WORKER_URLS} http://${node_ip}:${port}"
-        srun --nodes=1 --ntasks=1 --nodelist=$node --container-writable --environment=$VERL_ENVIRONMENT --kill-on-bad-exit=1 --gpus-per-task=1 --cpus-per-task=50 --gpu-bind=map_gpu:${i} --overlap --output=$LOG_DIR/node_rollout_${node_idx}_$i.log --error=$LOG_DIR/node_rollout_${node_idx}_$i.err \
-            bash --norc --noprofile -c "\
+        for i in $(seq 0 3); do
+            port=$((50000 + i))
+            WORKER_URLS="${WORKER_URLS} http://${node_ip}:${port}"
+            srun --nodes=1 --ntasks=1 --nodelist=$node --container-writable --environment=$VERL_ENVIRONMENT --kill-on-bad-exit=1 --gpus-per-task=1 --cpus-per-task=50 --gpu-bind=map_gpu:${i} --overlap --output=$LOG_DIR/node_rollout_${node_idx}_$i.log --error=$LOG_DIR/node_rollout_${node_idx}_$i.err \
+                bash --norc --noprofile -c "\
 set -ex
 
 export no_proxy=\"0.0.0.0,$no_proxy\"
@@ -319,11 +343,11 @@ export CUDA_VISIBLE_DEVICES=$i
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
 
 python -m sglang.launch_server --model-path=$ROLLOUT_MODEL_PATH --tokenizer-path=$TOKENIZER_PATH --dtype=$MODEL_DTYPE --host=0.0.0.0 --port=$port --decode-log-interval=1 --skip-server-warmup --random-seed=42 --grammar-backend=llguidance --mem-fraction-static=0.6 --max-running-requests=60" &
+        done
     done
-done
 
-srun --nodes=1 --ntasks=1 --nodelist=${rollout_nodes[0]} --container-writable --environment=$SGLANG_ROUTER_ENVIRONMENT --kill-on-bad-exit=1 --cpus-per-task=50 --overlap --output=$LOG_DIR/node_rollout_router.log --error=$LOG_DIR/node_rollout_router.err \
-    bash --norc --noprofile -c "\
+    srun --nodes=1 --ntasks=1 --nodelist=${rollout_nodes[0]} --container-writable --environment=$SGLANG_ROUTER_ENVIRONMENT --kill-on-bad-exit=1 --cpus-per-task=50 --overlap --output=$LOG_DIR/node_rollout_router.log --error=$LOG_DIR/node_rollout_router.err \
+        bash --norc --noprofile -c "\
 set -ex
 
 export no_proxy=\"0.0.0.0,$no_proxy\"

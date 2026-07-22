@@ -62,16 +62,22 @@ fi
 
 usage() {
   cat <<'EOF'
-Usage: eval_sweep.sh [--dry-run] SFT_OUTPUT_DIR [SFT_OUTPUT_DIR ...]
+Usage:
+  eval_sweep.sh [--dry-run] SFT_OUTPUT_DIR [SFT_OUTPUT_DIR ...]
+  eval_sweep.sh [--dry-run] --checkpoint HF_MODEL_DIR
 
 Submit one evaluation controller job per SFT run. Within each controller job,
 all global_step_<N>/huggingface checkpoints are served and evaluated
 sequentially. Completed eval outputs are not submitted again.
 
+With --checkpoint, evaluate one Hugging Face model directory directly instead
+of discovering global_step_<N>/huggingface directories below an SFT run.
+
 Examples:
   scripts/generation/eval_sweep.sh outputs/sft_1/run-a
   scripts/generation/eval_sweep.sh outputs/sft_1/run-a outputs/sft_1/run-b
   scripts/generation/eval_sweep.sh --dry-run outputs/sft_1/run-*
+  scripts/generation/eval_sweep.sh --checkpoint checkpoints/baselines/model
 
 Important environment overrides:
   OUTPUT_ROOT, EVAL_SUITE, THINKING, REPEATS, REPLICAS, SERVING_TIME,
@@ -96,6 +102,12 @@ checkpoint_dirs() {
   local candidate name
   local -a found=()
 
+  # A direct Hugging Face model is a one-checkpoint sweep.
+  if [[ -f "${run_dir}/config.json" ]]; then
+    printf '%s\n' "${run_dir}"
+    return 0
+  fi
+
   shopt -s nullglob
   for candidate in "${run_dir}"/global_step_*; do
     [[ -d "${candidate}" && ! -L "${candidate}" ]] || continue
@@ -112,9 +124,22 @@ eval_output_dir() {
   local stage run_name model_name
   stage="$(basename "$(dirname "${run_dir}")")"
   run_name="$(basename "${run_dir}")"
-  model_name="${run_name}__global_step_${step}__thinking-${THINKING}"
+  if [[ -f "${run_dir}/config.json" ]]; then
+    model_name="${run_name}__thinking-${THINKING}"
+  else
+    model_name="${run_name}__global_step_${step}__thinking-${THINKING}"
+  fi
   printf '%s/%s/%s' "${OUTPUT_ROOT}" "${stage}" "${model_name}"
   [[ -z "${eval_name}" ]] || printf '/%s' "${eval_name}"
+}
+
+checkpoint_model_path() {
+  local checkpoint="$1"
+  if [[ -f "${checkpoint}/config.json" ]]; then
+    printf '%s' "${checkpoint}"
+  else
+    printf '%s/huggingface' "${checkpoint}"
+  fi
 }
 
 # A marker is authoritative for new runs. A non-empty legacy results file is
@@ -189,7 +214,8 @@ worker_main() {
   source "${REPO}/.venv/bin/activate"
 
   mapfile -t checkpoints < <(checkpoint_dirs "${run_dir}")
-  ((${#checkpoints[@]} > 0)) || die "no global_step_<N> checkpoints in ${run_dir}"
+  ((${#checkpoints[@]} > 0)) || \
+    die "no global_step_<N> checkpoints or Hugging Face model in ${run_dir}"
 
   [[ -z "${RESERVATION}" ]] || reservation_args=(--reservation "${RESERVATION}")
   [[ -z "${ROUTER_ARGS}" ]] || router_args_opt=(--router-args "${ROUTER_ARGS}")
@@ -208,7 +234,7 @@ worker_main() {
   for checkpoint in "${checkpoints[@]}"; do
     checkpoint_name="${checkpoint##*/}"
     step="${checkpoint_name#global_step_}"
-    model_path="${checkpoint}/huggingface"
+    model_path="$(checkpoint_model_path "${checkpoint}")"
     checkpoint_output="$(eval_output_dir "${run_dir}" "${step}")"
 
     if ! checkpoint_has_pending_evals "${run_dir}" "${step}"; then
@@ -294,7 +320,7 @@ worker_main() {
 
 orchestrator_main() {
   local -a run_dirs=() validated_run_dirs=() checkpoints=() reservation_args=() summary=()
-  local arg run_dir checkpoint checkpoint_name step stage run_name
+  local arg run_dir checkpoint checkpoint_name step stage run_name model_path
   local pending job_dir state_file previous_job submit_out job_id script_path
 
   while (($#)); do
@@ -302,6 +328,11 @@ orchestrator_main() {
     case "${arg}" in
       -n|--dry-run) DRY_RUN=1 ;;
       -h|--help) usage; return 0 ;;
+      --checkpoint)
+        (($# >= 2)) || die "--checkpoint requires a Hugging Face model directory"
+        run_dirs+=("$2")
+        shift
+        ;;
       --) shift; run_dirs+=("$@"); break ;;
       -*) die "unknown option: ${arg}" ;;
       *) run_dirs+=("${arg}") ;;
@@ -319,10 +350,12 @@ orchestrator_main() {
     run_dir="$(realpath "${arg}")" || die "SFT output directory does not exist: ${arg}"
     [[ -d "${run_dir}" ]] || die "not a directory: ${run_dir}"
     mapfile -t checkpoints < <(checkpoint_dirs "${run_dir}")
-    ((${#checkpoints[@]} > 0)) || die "no global_step_<N> checkpoints in ${run_dir}"
+    ((${#checkpoints[@]} > 0)) || \
+      die "no global_step_<N> checkpoints or Hugging Face model in ${run_dir}"
     for checkpoint in "${checkpoints[@]}"; do
-      [[ -d "${checkpoint}/huggingface" ]] || \
-        die "checkpoint has no huggingface/ directory: ${checkpoint}"
+      model_path="$(checkpoint_model_path "${checkpoint}")"
+      [[ -f "${model_path}/config.json" ]] || \
+        die "checkpoint has no Hugging Face config: ${model_path}"
     done
     validated_run_dirs+=("${run_dir}")
   done
