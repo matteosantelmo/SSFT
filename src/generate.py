@@ -31,7 +31,20 @@ from openai import AsyncOpenAI, OpenAI
 from tqdm import tqdm
 
 from serving import GATEWAY_URL, load_api_key, wait_for_model, wait_for_running
-from verifier import REASON_CLOSE_TOKENS, verify
+from verl_compat import install_verl_stubs
+
+install_verl_stubs()
+
+from verl.utils.output_formatting import (  # noqa: E402
+    DISABLED_PARSER,
+    PARSER_NAMES,
+    PROMPT_ROLES,
+    SYSTEM_PROMPT_ROLE,
+    OutputFormattingConfig,
+    add_formatting_instruction,
+    parse_formatted_output,
+)
+from verifier import REASON_CLOSE_TOKENS, verify  # noqa: E402
 
 RESULTS_FILENAME = "results.jsonl"
 
@@ -40,6 +53,17 @@ def _str2bool(v) -> bool:
     if isinstance(v, bool):
         return v
     return str(v).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def _output_formatting_config(args: argparse.Namespace) -> OutputFormattingConfig:
+    """Build and validate output-formatting configuration from CLI arguments."""
+    config = OutputFormattingConfig(
+        parser=getattr(args, "output_formatting_parser", DISABLED_PARSER),
+        prompt=getattr(args, "output_formatting_prompt", None),
+        prompt_role=getattr(args, "output_formatting_prompt_role", SYSTEM_PROMPT_ROLE),
+    )
+    config.validate()
+    return config
 
 
 def _json_default(o):
@@ -64,6 +88,7 @@ def _row_index(extra_info, fallback) -> str:
 
 _REASON_OPEN = ("<|inner_prefix|>", "<think>")
 _REASON_CLOSE = REASON_CLOSE_TOKENS
+
 
 def _first_close(text: str) -> tuple[int, int]:
     """Return (index, length) of the earliest closing reasoning token, or (-1, 0)."""
@@ -92,12 +117,12 @@ def split_reasoning(content: str | None):
         hi, hi_len = _first_close(text)
         if hi == -1:
             return None, text  # no reasoning block -> all answer
-        return text[:hi], text[hi + hi_len:]
-    rest = text[lo + len(lo_tok):]
+        return text[:hi], text[hi + hi_len :]
+    rest = text[lo + len(lo_tok) :]
     hi, hi_len = _first_close(rest)
     if hi == -1:
         return rest, ""  # opened but never closed -> no usable answer
-    return rest[:hi], rest[hi + hi_len:]
+    return rest[:hi], rest[hi + hi_len :]
 
 
 def build_work_items(df: pd.DataFrame, repeats: int, seed: int) -> list[dict]:
@@ -117,16 +142,18 @@ def build_work_items(df: pd.DataFrame, repeats: int, seed: int) -> list[dict]:
         messages = _to_messages(rd["prompt"])
         base_id = f"{data_source}:{_row_index(extra_info, pos)}"
         for r in range(repeats):
-            items.append({
-                "id": f"{base_id}#{r}",
-                "repeat_idx": r,
-                "seed": seed + r,
-                "data_source": data_source,
-                "ability": rd.get("ability"),
-                "messages": messages,
-                "ground_truth": ground_truth,
-                "extra_info": extra_info if isinstance(extra_info, dict) else None,
-            })
+            items.append(
+                {
+                    "id": f"{base_id}#{r}",
+                    "repeat_idx": r,
+                    "seed": seed + r,
+                    "data_source": data_source,
+                    "ability": rd.get("ability"),
+                    "messages": messages,
+                    "ground_truth": ground_truth,
+                    "extra_info": extra_info if isinstance(extra_info, dict) else None,
+                }
+            )
     return items
 
 
@@ -210,15 +237,17 @@ async def process_item(
     sampling: dict,
     extra_body_base: dict,
     enable_thinking: bool,
+    output_formatting: OutputFormattingConfig = OutputFormattingConfig(),
 ) -> float | None:
     """Generate one response, verify it, enqueue the record. Returns the score."""
+    request_messages = add_formatting_instruction(item["messages"], output_formatting)
     record = {
         "id": item["id"],
         "data_source": item["data_source"],
         "ability": item["ability"],
         "repeat_idx": item["repeat_idx"],
         "seed": item["seed"],
-        "prompt": item["messages"],
+        "prompt": request_messages,
         "ground_truth": item["ground_truth"],
         "extra_info": item["extra_info"],
         "score": None,
@@ -229,11 +258,24 @@ async def process_item(
         "completion_tokens": None,
         "verify_seconds": None,
     }
+    if output_formatting.enabled:
+        record.update(
+            {
+                "original_prompt": item["messages"],
+                "raw_response": None,
+                "native_reasoning": None,
+                "final_response_text": None,
+                "output_format_parser": output_formatting.parser,
+                "output_format_prompt_role": output_formatting.prompt_role,
+                "output_format_valid": None,
+                "output_format_parse_outcome": None,
+            }
+        )
     try:
         async with gen_sem:
             resp = await client.chat.completions.create(
                 model=model,
-                messages=item["messages"],
+                messages=request_messages,
                 seed=item["seed"],
                 extra_body=extra_body_base or None,
                 **sampling,
@@ -246,13 +288,25 @@ async def process_item(
         reasoning = getattr(choice.message, "reasoning_content", None) or getattr(
             choice.message, "reasoning", None
         )
-        if reasoning:
+        if output_formatting.enabled:
+            raw_response = choice.message.content or ""
+            parsed = parse_formatted_output(raw_response, output_formatting)
+            answer = parsed.verifier_response
+            record["raw_response"] = raw_response
+            record["native_reasoning"] = reasoning
+            record["final_response_text"] = parsed.final_response
+            reasoning = parsed.reasoning
+            record["output_format_valid"] = parsed.format_valid
+            record["output_format_parse_outcome"] = parsed.outcome
+        elif reasoning:
             answer = choice.message.content or ""
         else:
             reasoning, answer = split_reasoning(choice.message.content)
         record["response"] = answer  # the answer (post-reasoning) is what gets scored
         record["reasoning"] = reasoning
-        record["missing_reasoning"] = bool(enable_thinking and not reasoning)
+        record["missing_reasoning"] = bool(
+            (output_formatting.enabled or enable_thinking) and not reasoning
+        )
         record["finish_reason"] = choice.finish_reason
         if resp.usage:
             record["completion_tokens"] = resp.usage.completion_tokens
@@ -261,8 +315,12 @@ async def process_item(
         async with verify_sem:
             t0 = time.perf_counter()
             result = await loop.run_in_executor(
-                verify_pool, verify, item["data_source"], answer,
-                item["ground_truth"], item["extra_info"],
+                verify_pool,
+                verify,
+                item["data_source"],
+                answer,
+                item["ground_truth"],
+                item["extra_info"],
             )
             verify_seconds = time.perf_counter() - t0
         record.update(result)  # adds score (+ error/extra keys if any)
@@ -291,7 +349,9 @@ async def process_prompt(
 
 async def run(args, items: list[dict], results_path: str) -> None:
     """Drive all work items concurrently (generate + verify) and stream results to disk."""
-    client = AsyncOpenAI(base_url=args.base_url, api_key=load_api_key(), max_retries=args.max_retries)
+    client = AsyncOpenAI(
+        base_url=args.base_url, api_key=load_api_key(), max_retries=args.max_retries
+    )
     gen_sem = asyncio.Semaphore(args.concurrency)
     verify_sem = asyncio.Semaphore(args.verify_concurrency)
     queue: asyncio.Queue = asyncio.Queue(maxsize=args.concurrency * 4)
@@ -312,10 +372,21 @@ async def run(args, items: list[dict], results_path: str) -> None:
     if args.top_k is not None:
         extra_body_base["top_k"] = args.top_k
 
+    output_formatting = _output_formatting_config(args)
+
     async def process(it: dict) -> dict:
         return await process_item(
-            it, client, args.served_model_name, gen_sem, verify_sem,
-            verify_pool, queue, sampling, extra_body_base, args.enable_thinking,
+            it,
+            client,
+            args.served_model_name,
+            gen_sem,
+            verify_sem,
+            verify_pool,
+            queue,
+            sampling,
+            extra_body_base,
+            args.enable_thinking,
+            output_formatting,
         )
 
     writer = asyncio.create_task(writer_task(queue, results_path))
@@ -324,9 +395,7 @@ async def run(args, items: list[dict], results_path: str) -> None:
         for item in items:
             groups.setdefault(_prompt_id(item["id"]), []).append(item)
         tasks = [
-            asyncio.create_task(
-                process_prompt(group, process, args.correct_threshold)
-            )
+            asyncio.create_task(process_prompt(group, process, args.correct_threshold))
             for group in groups.values()
         ]
     else:
@@ -351,9 +420,11 @@ async def run(args, items: list[dict], results_path: str) -> None:
 
     if verify_times:
         total = sum(verify_times)
-        print(f"[verify] {len(verify_times)} samples, cumulative {total:.1f}s of scoring "
-              f"(mean {total / len(verify_times):.3f}s/sample, max {max(verify_times):.3f}s; "
-              f"runs concurrently, so wall-clock is lower)")
+        print(
+            f"[verify] {len(verify_times)} samples, cumulative {total:.1f}s of scoring "
+            f"(mean {total / len(verify_times):.3f}s/sample, max {max(verify_times):.3f}s; "
+            f"runs concurrently, so wall-clock is lower)"
+        )
 
     await queue.put(None)  # tell writer to finish
     await writer
@@ -362,15 +433,34 @@ async def run(args, items: list[dict], results_path: str) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Generate + verify responses for a verl-format parquet.")
-    p.add_argument("--input", required=True, nargs="+",
-                   help="Input parquet(s) (verl format); multiple are concatenated.")
-    p.add_argument("--served-model-name", required=True, help="Model id to query on the gateway.")
-    p.add_argument("--output-dir", required=True, help="Run dir; results.jsonl written here.")
-    p.add_argument("--job-id", type=int, default=None, help="Slurm job id to watch (fail fast).")
+    p = argparse.ArgumentParser(
+        description="Generate + verify responses for a verl-format parquet."
+    )
+    p.add_argument(
+        "--input",
+        required=True,
+        nargs="+",
+        help="Input parquet(s) (verl format); multiple are concatenated.",
+    )
+    p.add_argument(
+        "--served-model-name", required=True, help="Model id to query on the gateway."
+    )
+    p.add_argument(
+        "--output-dir", required=True, help="Run dir; results.jsonl written here."
+    )
+    p.add_argument(
+        "--job-id", type=int, default=None, help="Slurm job id to watch (fail fast)."
+    )
     p.add_argument("--base-url", default=GATEWAY_URL)
-    p.add_argument("--concurrency", type=int, default=128, help="Max in-flight generations.")
-    p.add_argument("--verify-concurrency", type=int, default=32, help="Max concurrent verifications.")
+    p.add_argument(
+        "--concurrency", type=int, default=128, help="Max in-flight generations."
+    )
+    p.add_argument(
+        "--verify-concurrency",
+        type=int,
+        default=32,
+        help="Max concurrent verifications.",
+    )
     p.add_argument("--repeats", type=int, default=1, help="Generations per prompt.")
     p.add_argument(
         "--stop-on-first-correct",
@@ -383,25 +473,72 @@ def parse_args() -> argparse.Namespace:
         default=0.7,
         help="Score considered correct when --stop-on-first-correct is enabled.",
     )
-    p.add_argument("--seed", type=int, default=0,
-                   help="Base request seed; repeat i uses seed+i so repeats diverge yet stay reproducible.")
-    p.add_argument("--start", type=int, default=0, help="First row (inclusive), per input file.")
-    p.add_argument("--end", type=int, default=None,
-                   help="Last row (exclusive), per input file; default = end of file.")
+    p.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Base request seed; repeat i uses seed+i so repeats diverge yet stay reproducible.",
+    )
+    p.add_argument(
+        "--start", type=int, default=0, help="First row (inclusive), per input file."
+    )
+    p.add_argument(
+        "--end",
+        type=int,
+        default=None,
+        help="Last row (exclusive), per input file; default = end of file.",
+    )
     p.add_argument("--temperature", type=float, default=0.7)
     p.add_argument("--top-p", type=float, default=0.95)
-    p.add_argument("--top-k", type=int, default=None,
-                   help="top_k sampling, sent via extra_body (vLLM/sglang extension); omit to disable.")
+    p.add_argument(
+        "--top-k",
+        type=int,
+        default=None,
+        help="top_k sampling, sent via extra_body (vLLM/sglang extension); omit to disable.",
+    )
     p.add_argument("--max-tokens", type=int, default=2048)
-    p.add_argument("--enable-thinking", type=_str2bool, default=False,
-                   help="Global thinking flag sent as chat_template_kwargs.enable_thinking for all samples.")
-    p.add_argument("--chat-template-kwargs", default=None,
-                   help='JSON dict replacing the default {"enable_thinking": ...} chat_template_kwargs '
-                        '(model templates differ, e.g. DeepSeek-V4 uses {"thinking": true}). '
-                        'Pass {} to send no chat_template_kwargs at all.')
-    p.add_argument("--skip-special-tokens", type=_str2bool, default=True,
-                   help="vLLM skip_special_tokens. false keeps markers (e.g. <|inner_prefix|>) in the response.")
-    p.add_argument("--max-retries", type=int, default=6, help="OpenAI client retry budget per request.")
+    p.add_argument(
+        "--enable-thinking",
+        type=_str2bool,
+        default=False,
+        help="Global thinking flag sent as chat_template_kwargs.enable_thinking for all samples.",
+    )
+    p.add_argument(
+        "--chat-template-kwargs",
+        default=None,
+        help='JSON dict replacing the default {"enable_thinking": ...} chat_template_kwargs '
+        '(model templates differ, e.g. DeepSeek-V4 uses {"thinking": true}). '
+        "Pass {} to send no chat_template_kwargs at all.",
+    )
+    p.add_argument(
+        "--skip-special-tokens",
+        type=_str2bool,
+        default=True,
+        help="vLLM skip_special_tokens. false keeps markers (e.g. <|inner_prefix|>) in the response.",
+    )
+    p.add_argument(
+        "--output-formatting-parser",
+        choices=PARSER_NAMES,
+        default=DISABLED_PARSER,
+        help="Semantic output parser; 'none' disables output formatting.",
+    )
+    p.add_argument(
+        "--output-formatting-prompt",
+        default=None,
+        help="Formatting instruction; omit to use the selected parser's default.",
+    )
+    p.add_argument(
+        "--output-formatting-prompt-role",
+        choices=PROMPT_ROLES,
+        default=SYSTEM_PROMPT_ROLE,
+        help="Place the formatting instruction in the system prompt or append it to the last user message.",
+    )
+    p.add_argument(
+        "--max-retries",
+        type=int,
+        default=6,
+        help="OpenAI client retry budget per request.",
+    )
     p.add_argument("--job-timeout", type=int, default=2400)
     p.add_argument("--ready-timeout", type=int, default=2400)
     return p.parse_args()
@@ -409,6 +546,10 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    try:
+        _output_formatting_config(args)
+    except ValueError as exc:
+        sys.exit(f"[fatal] {exc}")
     os.makedirs(args.output_dir, exist_ok=True)
     results_path = os.path.join(args.output_dir, RESULTS_FILENAME)
 
@@ -416,7 +557,7 @@ def main() -> None:
     for path in args.input:
         df = pd.read_parquet(path)
         end = args.end if args.end is not None else len(df)
-        df = df.iloc[args.start:end]
+        df = df.iloc[args.start : end]
         print(f"[input] {path}: rows [{args.start}:{end}] -> {len(df)} prompts")
         frames.append(df)
     df = pd.concat(frames, ignore_index=True)
@@ -427,8 +568,10 @@ def main() -> None:
     # ids key the results.jsonl resume logic, so collisions would silently drop work.
     ids = [it["id"] for it in items]
     if len(set(ids)) != len(ids):
-        sys.exit("[fatal] duplicate work-item ids across inputs — check for a repeated "
-                 "(data_source, extra_info.index) pair in the input parquets.")
+        sys.exit(
+            "[fatal] duplicate work-item ids across inputs — check for a repeated "
+            "(data_source, extra_info.index) pair in the input parquets."
+        )
     completed = load_completed_results(results_path)
     if completed:
         before = len(items)
@@ -438,8 +581,10 @@ def main() -> None:
             args.stop_on_first_correct,
             args.correct_threshold,
         )
-        print(f"[resume] {len(completed)} results already present; "
-              f"skipping {before - len(items)}, {len(items)} remaining.")
+        print(
+            f"[resume] {len(completed)} results already present; "
+            f"skipping {before - len(items)}, {len(items)} remaining."
+        )
     if not items:
         print("[done] nothing to do — all requested items already present.")
         return
@@ -449,7 +594,9 @@ def main() -> None:
         probe = OpenAI(base_url=args.base_url, api_key=load_api_key())
         if args.job_id is not None:
             wait_for_running(args.job_id, args.job_timeout)
-        wait_for_model(probe, args.served_model_name, args.ready_timeout, job_id=args.job_id)
+        wait_for_model(
+            probe, args.served_model_name, args.ready_timeout, job_id=args.job_id
+        )
     except (RuntimeError, TimeoutError) as exc:
         sys.exit(f"[fatal] {exc}")
 

@@ -52,6 +52,9 @@ SERVING_TIME="${SERVING_TIME:-02:00:00}"
 SWEEP_TIME="${SWEEP_TIME:-02:00:00}"
 CLIENT_CPUS="${CLIENT_CPUS:-32}"
 KUBERNETES_SANDBOX_URL="${KUBERNETES_SANDBOX_URL:-https://sandbox-dev.swissai.svc.cscs.ch}"
+OUTPUT_FORMATTING_PARSER="${OUTPUT_FORMATTING_PARSER:-none}"
+OUTPUT_FORMATTING_PROMPT="${OUTPUT_FORMATTING_PROMPT:-}"
+OUTPUT_FORMATTING_PROMPT_ROLE="${OUTPUT_FORMATTING_PROMPT_ROLE:-system}"
 DRY_RUN="${DRY_RUN:-0}"
 
 if [[ "${THINKING}" == "on" ]]; then
@@ -81,7 +84,8 @@ Examples:
 
 Important environment overrides:
   OUTPUT_ROOT, EVAL_SUITE, THINKING, REPEATS, REPLICAS, SERVING_TIME,
-  SWEEP_TIME, PARTITION, ACCOUNT, RESERVATION, DRY_RUN
+  SWEEP_TIME, PARTITION, ACCOUNT, RESERVATION, OUTPUT_FORMATTING_PARSER,
+  OUTPUT_FORMATTING_PROMPT, OUTPUT_FORMATTING_PROMPT_ROLE, DRY_RUN
 EOF
 }
 
@@ -180,6 +184,12 @@ run_generate() {
   [[ -z "${CHAT_TEMPLATE_KWARGS:-}" ]] || \
     extra_args+=(--chat-template-kwargs "${CHAT_TEMPLATE_KWARGS}")
   [[ -z "${MAX_RETRIES:-}" ]] || extra_args+=(--max-retries "${MAX_RETRIES}")
+  [[ -z "${OUTPUT_FORMATTING_PARSER}" ]] || \
+    extra_args+=(--output-formatting-parser "${OUTPUT_FORMATTING_PARSER}")
+  [[ -z "${OUTPUT_FORMATTING_PROMPT}" ]] || \
+    extra_args+=(--output-formatting-prompt "${OUTPUT_FORMATTING_PROMPT}")
+  [[ -z "${OUTPUT_FORMATTING_PROMPT_ROLE}" ]] || \
+    extra_args+=(--output-formatting-prompt-role "${OUTPUT_FORMATTING_PROMPT_ROLE}")
 
   python "${REPO}/src/generate.py" \
     --job-id "${job_id}" \
@@ -402,6 +412,7 @@ orchestrator_main() {
     export CHAT_TEMPLATE ROUTER_ARGS PARTITION ACCOUNT RESERVATION SERVING_TIME SWEEP_TIME
     export CLIENT_CPUS KUBERNETES_SANDBOX_URL SKIP_SPECIAL_TOKENS
     export TOP_K CHAT_TEMPLATE_KWARGS MAX_RETRIES ENV_TOML
+    export OUTPUT_FORMATTING_PARSER OUTPUT_FORMATTING_PROMPT OUTPUT_FORMATTING_PROMPT_ROLE
     if ! submit_out="$(sbatch \
       --parsable \
       --job-name="eval-${run_name:0:32}" \

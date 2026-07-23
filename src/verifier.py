@@ -1,32 +1,8 @@
 from __future__ import annotations
 
-import os
-import sys
-import types
+from verl_compat import install_verl_stubs
 
-VERL_ROOT = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "verl_rl"
-)
-
-
-def _install_verl_stubs() -> None:
-    """Register stub ``verl`` / ``verl.utils`` packages to skip verl's __init__."""
-    verl_pkg = os.path.join(VERL_ROOT, "verl")
-    for name, path in (("verl", verl_pkg), ("verl.utils", os.path.join(verl_pkg, "utils"))):
-        if name not in sys.modules:
-            mod = types.ModuleType(name)
-            mod.__path__ = [path]  # mark as a package so submodules import
-            sys.modules[name] = mod
-    # link child onto parent so ``verl.utils`` attribute access works
-    sys.modules["verl"].utils = sys.modules["verl.utils"]
-
-
-if not os.path.isdir(os.path.join(VERL_ROOT, "verl")):
-    raise RuntimeError(
-        f"verl submodule not found at {VERL_ROOT}; run `git submodule update --init`."
-    )
-
-_install_verl_stubs()
+install_verl_stubs()
 
 from verl.utils.reward_score import default_compute_score  # noqa: E402
 

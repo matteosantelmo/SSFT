@@ -32,33 +32,58 @@ REPO="/iopsstor/scratch/cscs/msantelmo/SSFT"
 cd "$REPO"
 
 # ---- configuration (override via env) --------------------------------------
-DOMAIN="code"
+DOMAIN="if"
 
 INPUT_PARQUET=/iopsstor/scratch/cscs/msantelmo/SSFT/data/cap_filter/${DOMAIN}/train.parquet
 PROJECT_NAME="capability-filtering"
 
+# Semantic response formatting: none, markdown, xml, or xml_think. An empty
+# prompt uses the parser default; prompt role is system or user.
+OUTPUT_FORMATTING_PARSER="markdown"  # xml, xml_think
+OUTPUT_FORMATTING_PROMPT="${OUTPUT_FORMATTING_PROMPT:-}"
+OUTPUT_FORMATTING_PROMPT_ROLE="system"  # user
+
+# Apertus v1 SFT0
 # MODEL_PATH=/iopsstor/scratch/cscs/msantelmo/checkpoints/sft_0/Apertus-8B-2509__sft_0__sp2-lr5e-5-bs512-warmuplinear-lr_warmup_steps_ratio0.03__20260710-095910__global_step_11776
 # OUTPUT_DIR="/users/msantelmo/scratch/SSFT/outputs/capability-filtering/Apertus-8B-2509__sft_0__sp2-lr5e-5-bs512-warmuplinear-lr_warmup_steps_ratio0.03__20260710-095910__global_step_11776/${DOMAIN}"
-MODEL_PATH=/iopsstor/scratch/cscs/msantelmo/checkpoints/sft_0/apertus-1p5_8b_seq_len_256k_7000__sft_0_lr5e-5-ratio03__global_step_11264
-OUTPUT_DIR="/users/msantelmo/scratch/SSFT/outputs/capability-filtering/apertus-1p5_8b_seq_len_256k_7000__sft_0_lr5e-5-ratio03__global_step_11264/${DOMAIN}"
+
+# Apertus 1p5 SFT0
+# MODEL_PATH=/iopsstor/scratch/cscs/msantelmo/checkpoints/sft_0/apertus-1p5_8b_seq_len_256k_7000__sft_0_lr5e-5-ratio03__global_step_11264
+# OUTPUT_DIR="/users/msantelmo/scratch/SSFT/outputs/capability-filtering/apertus-1p5_8b_seq_len_256k_7000__sft_0_lr5e-5-ratio03__global_step_11264/${DOMAIN}"
+
+# Qwen2.5 SFT0
+# MODEL_PATH=/iopsstor/scratch/cscs/msantelmo/checkpoints/sft_0/Qwen2.5-7B__sft_0_lr1e-5-ratio03__global_step_8192
+# OUTPUT_DIR="/users/msantelmo/scratch/SSFT/outputs/capability-filtering/Qwen2.5-7B__sft_0_lr1e-5-ratio03__global_step_8192/${DOMAIN}"
+
+# # Apertus 1p5 SFT0 + RL0
+# MODEL_PATH=/iopsstor/scratch/cscs/msantelmo/checkpoints/rl_0/apertus-1p5_8b_256k__sft0_11264__no-format-no-constr__global_step_420
+# OUTPUT_DIR="/users/msantelmo/scratch/SSFT/outputs/capability-filtering/apertus-1p5_8b_256k__sft0_11264__no-format-no-constr__global_step_420__${OUTPUT_FORMATTING_PARSER}/${DOMAIN}"
+
+# # Qwen2.5 SFT0 + RL0-xml
+# MODEL_PATH=/iopsstor/scratch/cscs/msantelmo/checkpoints/rl_0/Qwen2-5-7B__sft0_8192__xml-think__global_step_252
+# OUTPUT_DIR="/users/msantelmo/scratch/SSFT/outputs/capability-filtering/Qwen2-5-7B__sft0_8192__xml-think__global_step_252__${OUTPUT_FORMATTING_PARSER}/${DOMAIN}"
+
+# Qwen2.5 SFT0 + RL0 no-format-no-constr
+MODEL_PATH=/iopsstor/scratch/cscs/msantelmo/checkpoints/rl_0/Qwen2-5-7B__sft0_8192__no-format-no-constr__global_step_242
+OUTPUT_DIR="/users/msantelmo/scratch/SSFT/outputs/capability-filtering/Qwen2-5-7B__sft0_8192__no-format-no-constr__global_step_242__${OUTPUT_FORMATTING_PARSER}/${DOMAIN}"
+
 TOKENIZER_PATH=${MODEL_PATH}
 CHAT_TEMPLATE=""
-THINKING=off
+THINKING=on
+SKIP_SPECIAL_TOKENS=true # Must be false to parse reasoning <|inner_prefix|>/<|inner_suffix|>
+
+STOP_ON_FIRST_CORRECT=off
 
 if [[ "$THINKING" == "on" ]]; then
-  # Must be false to parse reasoning <|inner_prefix|>/<|inner_suffix|>
-  SKIP_SPECIAL_TOKENS=false
   THINKING_TAG="-think"
 else
-  SKIP_SPECIAL_TOKENS=true
   THINKING_TAG="-no-think"
 fi
 
-STOP_ON_FIRST_CORRECT=on
 CORRECT_THRESHOLD="${CORRECT_THRESHOLD:-0.7}"
 TIME_LIMIT="${TIME_LIMIT:-12:00:00}"
 REPEATS=8
-REPLICAS=32
+REPLICAS=12
 NODES_PER_REPLICA=1
 TP_SIZE=1
 DP_SIZE=4
@@ -87,7 +112,7 @@ CONCURRENCY="${CONCURRENCY:-1024}"
 VERIFY_CONCURRENCY="${VERIFY_CONCURRENCY:-32}"
 TEMPERATURE="${TEMPERATURE:-0.8}"
 TOP_P="${TOP_P:-0.95}"
-MAX_TOKENS=4096
+MAX_TOKENS=16384
 START="${START:-0}"
 END="${END:-}"
 
@@ -194,7 +219,8 @@ KEEP_ALIVE="${KEEP_ALIVE:-0}"
 export REPO JOB_ID SERVED_MODEL_NAME INPUT_PARQUET OUTPUT_DIR \
   CONCURRENCY VERIFY_CONCURRENCY REPEATS SEED TEMPERATURE TOP_P MAX_TOKENS \
   SKIP_SPECIAL_TOKENS THINKING START END KEEP_ALIVE STOP_ON_FIRST_CORRECT \
-  CORRECT_THRESHOLD KUBERNETES_SANDBOX_URL
+  CORRECT_THRESHOLD KUBERNETES_SANDBOX_URL OUTPUT_FORMATTING_PARSER \
+  OUTPUT_FORMATTING_PROMPT OUTPUT_FORMATTING_PROMPT_ROLE
 
 client_submit="$(sbatch \
   --partition="$PARTITION" \

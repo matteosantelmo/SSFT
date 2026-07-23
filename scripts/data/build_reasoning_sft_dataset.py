@@ -6,6 +6,10 @@ attempts scored above the threshold (i.e. the prompt is inside the model's suppo
 Attempts that were cut off by the generation token limit (finish_reason "length")
 never count as correct, regardless of their score.
 
+Optional self-teacher results are merged into the teacher pool before any dataset
+strategy is applied. Higher-scoring traces win, with self-teacher CoTs preferred
+over external-teacher CoTs when their scores are equal.
+
 One invocation can write several datasets via repeatable --build NAME:STRATEGY:MODE
 specs: the heavy inputs (teacher/student results, SFT-0) are loaded once and shared
 across builds, with outputs identical to separate single-build runs.
@@ -288,6 +292,37 @@ def load_best_generations(
     attempt_counts = {pid: mask.bit_count() for pid, mask in attempt_masks.items()}
     pass_counts = {pid: mask.bit_count() for pid, mask in pass_masks.items()}
     return best, attempt_counts, pass_counts
+
+
+def merge_teacher_pools(
+    external_best: dict[str, dict[str, Any]],
+    self_teacher_best: dict[str, dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], dict[str, int]]:
+    """Merge teacher pools by score, preferring self-teacher CoTs on ties.
+
+    A self-teacher record without reasoning cannot provide a privileged CoT, so
+    it is ignored and the external trace remains available as fallback.
+    """
+    merged = dict(external_best)
+    selected_self = 0
+    ignored_self_without_reasoning = 0
+    for pid, self_teacher in self_teacher_best.items():
+        if not self_teacher.get("reasoning"):
+            ignored_self_without_reasoning += 1
+            continue
+        external = external_best.get(pid)
+        if external is None or float(self_teacher["score"]) >= float(external["score"]):
+            merged[pid] = self_teacher
+            selected_self += 1
+
+    stats = {
+        "external_candidates": len(external_best),
+        "self_teacher_candidates": len(self_teacher_best),
+        "self_teacher_without_reasoning": ignored_self_without_reasoning,
+        "selected_self_teacher": selected_self,
+        "selected_external_teacher": len(merged) - selected_self,
+    }
+    return merged, stats
 
 
 def convert_prompt(prompt: Any) -> list[dict[str, Any]]:
@@ -789,7 +824,23 @@ def write_manifest(output_dir: Path, stats: dict[str, Any]) -> None:
 def parse_args() -> argparse.Namespace:
     """Parse and validate command-line arguments."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--teacher-results", type=Path, action="append", required=True)
+    parser.add_argument(
+        "--teacher-results",
+        type=Path,
+        action="append",
+        default=[],
+        help="External-teacher result file or directory. Repeat as needed.",
+    )
+    parser.add_argument(
+        "--self-teacher-results",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "Optional self-teacher result file or directory. Repeat as needed. "
+            "Higher scores beat external teachers; self-teacher CoTs win score ties."
+        ),
+    )
     parser.add_argument("--student-results", type=Path, action="append", default=[])
     parser.add_argument("--sft0", type=Path, action="append", default=[])
     parser.add_argument("--output-dir", type=Path, help="output directory for a single build")
@@ -874,6 +925,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lsh-num-hashes", type=int, default=DEFAULT_HASHES)
     parser.add_argument("--lsh-bands", type=int, default=DEFAULT_BANDS)
     args = parser.parse_args()
+    if not args.teacher_results and not args.self_teacher_results:
+        parser.error("at least one of --teacher-results or --self-teacher-results is required")
     if args.max_attempts <= 0:
         parser.error("--max-attempts must be positive")
     if not 0 <= args.score_threshold <= 1:
@@ -970,12 +1023,42 @@ def main() -> None:
         log("all requested builds already exist; nothing to do")
         return
 
-    teacher_best, teacher_attempt_counts, _teacher_pass_counts = load_best_generations(
-        args.teacher_results,
-        max_attempts=args.max_attempts,
-        score_threshold=args.score_threshold,
-        source_name="teacher",
+    external_teacher_best, external_teacher_attempt_counts, _teacher_pass_counts = (
+        load_best_generations(
+            args.teacher_results,
+            max_attempts=args.max_attempts,
+            score_threshold=args.score_threshold,
+            source_name="teacher",
+        )
+        if args.teacher_results
+        else ({}, {}, {})
     )
+    if args.self_teacher_results:
+        self_teacher_best, self_teacher_attempt_counts, _self_teacher_pass_counts = load_best_generations(
+            args.self_teacher_results,
+            max_attempts=args.max_attempts,
+            score_threshold=args.score_threshold,
+            source_name="self-teacher",
+        )
+        teacher_best, teacher_pool_stats = merge_teacher_pools(
+            external_teacher_best,
+            self_teacher_best,
+        )
+        log(
+            "[teacher-pool] selected "
+            f"{teacher_pool_stats['selected_self_teacher']:,} self-teacher and "
+            f"{teacher_pool_stats['selected_external_teacher']:,} external traces"
+        )
+    else:
+        self_teacher_attempt_counts = {}
+        teacher_best = external_teacher_best
+        teacher_pool_stats = {
+            "external_candidates": len(external_teacher_best),
+            "self_teacher_candidates": 0,
+            "self_teacher_without_reasoning": 0,
+            "selected_self_teacher": 0,
+            "selected_external_teacher": len(external_teacher_best),
+        }
     student_best, student_attempt_counts, student_pass_counts = (
         load_best_generations(
             args.student_results,
@@ -1066,6 +1149,11 @@ def main() -> None:
             "no_cot_enable_thinking_strategy": args.no_cot_enable_thinking_strategy,
             "solvable_cot_alpha": args.solvable_cot_alpha,
             "teacher_prompts_with_positive_score": len(teacher_best),
+            "external_teacher_candidates": teacher_pool_stats["external_candidates"],
+            "self_teacher_candidates": teacher_pool_stats["self_teacher_candidates"],
+            "self_teacher_without_reasoning": teacher_pool_stats["self_teacher_without_reasoning"],
+            "selected_self_teacher_traces": teacher_pool_stats["selected_self_teacher"],
+            "selected_external_teacher_traces": teacher_pool_stats["selected_external_teacher"],
             "student_prompt_count": len(student_attempt_counts),
             "reasoning_rows": len(reasoning_rows),
             "reasoning_rows_with_thought_blocks": thought_counts[build.strategy],
@@ -1073,7 +1161,8 @@ def main() -> None:
             "sft0_rows_loaded": sft0_count,
             "sft0_rows_removed_by_prompt_dedup": dedup_removed,
             "final_rows": len(all_rows),
-            "teacher_attempt_count_max": max(teacher_attempt_counts.values(), default=0),
+            "teacher_attempt_count_max": max(external_teacher_attempt_counts.values(), default=0),
+            "self_teacher_attempt_count_max": max(self_teacher_attempt_counts.values(), default=0),
             "student_attempt_count_max": max(student_attempt_counts.values(), default=0),
         }
         if build.strategy == "teacher-only":

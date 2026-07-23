@@ -110,7 +110,7 @@ LR_WARMUP_STEPS_RATIO=0.03
 TOTAL_EPOCHS=2
 if [[ "$DATASET_PATH" == *"sft0+"* ]] || [[ "$DATASET_PATH" == *"mix-sft0"* ]]; then
     TEST_FREQ=1024
-    SAVE_FREQ=1024
+    SAVE_FREQ=2048
     ROLLOUT_NODES=8
 else
     TEST_FREQ=256

@@ -110,6 +110,11 @@ RESERVATION="SD-69241-apertus-1-5-0"
 # Code verifiers (taco/apps/codeforces/...) run in the Kubernetes sandbox when
 # this is set; unset it to fall back to local prime_code execution.
 KUBERNETES_SANDBOX_URL="${KUBERNETES_SANDBOX_URL:-https://sandbox-dev.swissai.svc.cscs.ch}"
+# Semantic response formatting: none, markdown, xml, or xml_think. An empty
+# prompt uses the parser default; prompt role is system or user.
+OUTPUT_FORMATTING_PARSER="${OUTPUT_FORMATTING_PARSER:-none}"
+OUTPUT_FORMATTING_PROMPT="${OUTPUT_FORMATTING_PROMPT:-}"
+OUTPUT_FORMATTING_PROMPT_ROLE="${OUTPUT_FORMATTING_PROMPT_ROLE:-system}"
 SEED="85"
 CONCURRENCY="${CONCURRENCY:-512}"
 VERIFY_CONCURRENCY="${VERIFY_CONCURRENCY:-32}"
@@ -261,7 +266,8 @@ for i in "${!MODELS[@]}"; do
   export REPO JOB_ID SERVED_MODEL_NAME INPUT_PARQUET OUTPUT_DIR \
     CONCURRENCY VERIFY_CONCURRENCY REPEATS SEED TEMPERATURE TOP_P MAX_TOKENS \
     SKIP_SPECIAL_TOKENS THINKING START END KEEP_ALIVE STOP_ON_FIRST_CORRECT \
-    CORRECT_THRESHOLD KUBERNETES_SANDBOX_URL PER_INPUT_SUBDIR
+    CORRECT_THRESHOLD KUBERNETES_SANDBOX_URL PER_INPUT_SUBDIR \
+    OUTPUT_FORMATTING_PARSER OUTPUT_FORMATTING_PROMPT OUTPUT_FORMATTING_PROMPT_ROLE
 
   if ! client_submit="$(sbatch \
     --partition="$PARTITION" \
@@ -281,6 +287,7 @@ for i in "${!MODELS[@]}"; do
   echo "[ok] serving=$JOB_ID client=$CLIENT_JOB_ID -> $OUTPUT_DIR"
   summary+=("$STAGE/$MODEL_NAME  serving=$JOB_ID client=$CLIENT_JOB_ID  $OUTPUT_DIR")
   all_jobs+=("$JOB_ID" "$CLIENT_JOB_ID")
+  sleep 5
 done
 
 echo "============================================================"
